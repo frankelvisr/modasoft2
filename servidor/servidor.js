@@ -1,6 +1,186 @@
 
 // servidor/servidor.js
-// ...existing code...
+
+const express = require('express');
+const path = require('path');
+let bcrypt;
+try {
+  // prefer native bcrypt if available
+  bcrypt = require('bcrypt');
+} catch (e) {
+  // fallback to bcryptjs (pure JS) which is already installed
+  bcrypt = require('bcryptjs');
+}
+const { pool, verificarConexiónBD, obtenerProductos } = require('./db'); // db.js con MySQL
+const { verificarCredenciales } = require('./auth');
+const cookieSession = require('cookie-session');
+
+// 1. INICIALIZAR APP DE EXPRESS
+const app = express();
+
+// 2. MIDDLEWARE DE AUTENTICACIÓN (debe ir antes de las rutas que lo usan)
+function requiereRol(rol) {
+  return (req, res, next) => {
+    const u = req.session && req.session.user;
+    if (!u) return res.status(401).json({ ok: false, error: 'No autenticado' });
+    // Supuestos: id_rol 1 = Administrador, 2 = Caja
+    const esAdmin = u.id_rol == 1;
+    const esCaja = u.id_rol == 2;
+
+    if (rol === 'administrador' && esAdmin) return next();
+    if (rol === 'caja' && esCaja) return next();
+    if (rol === 'cualquiera' && (esAdmin || esCaja)) return next(); // Para rutas generales
+    
+    return res.status(403).json({ ok: false, error: 'Acceso no autorizado' });
+  };
+}
+
+// 3. MIDDLEWARE GENERAL
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use(cookieSession({
+  name: 'session',
+  keys: ['clave-secreta-unica'], // reemplaza por una clave real en producción
+  maxAge: 1000 * 60 * 60 // 1 hora
+}));
+
+// Servir archivos estáticos (front-end)
+app.use(express.static(path.join(__dirname, '..', 'public')));
+
+// Intento de migración ligera al iniciar: eliminar id_talla de detallecompra porque las compras no usan talla
+(async function ajustarEsquemaDetalleCompra() {
+  try {
+    // 1) Intentar eliminar la clave foránea hacia tallas si existe
+    try {
+      await pool.query("ALTER TABLE detallecompra DROP FOREIGN KEY detallecompra_ibfk_3");
+      console.log('Esquema: se eliminó la FK detallecompra_ibfk_3 (si existía).');
+    } catch (e) {
+      // si la FK no existe con ese nombre, intentamos buscar y eliminar cualquier FK que referencia tallas
+      try {
+        const [fks] = await pool.query("SELECT CONSTRAINT_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'detallecompra' AND REFERENCED_TABLE_NAME = 'tallas'");
+        for (const fk of fks) {
+          await pool.query(`ALTER TABLE detallecompra DROP FOREIGN KEY \`${fk.CONSTRAINT_NAME}\``);
+          console.log(`Esquema: se eliminó la FK ${fk.CONSTRAINT_NAME} en detallecompra`);
+        }
+      } catch (e2) {
+        // no crítico
+      }
+    }
+
+    // 2) Intentar DROP COLUMN id_talla si existe
+    try {
+      await pool.query('ALTER TABLE detallecompra DROP COLUMN id_talla');
+      console.log('Esquema: columna detallecompra.id_talla eliminada (si existía).');
+    } catch (e) {
+      // Si falla, puede que la columna no exista o no tengamos permisos; registramos y seguimos
+      console.warn('Advertencia al intentar eliminar columna detallecompra.id_talla:', e.message || e);
+    }
+  } catch (e) {
+    console.warn('Advertencia en ajuste de esquema detallecompra:', e.message || e);
+  }
+})();
+
+
+// ---------------- Rutas compartidas: Logout ----------------
+app.post('/api/logout', (req, res) => {
+  req.session = null;
+  res.json({ ok: true });
+});
+
+// Ruta: estado del servidor y BD
+app.get('/api/status', async (req, res) => {
+  const bdOK = await verificarConexiónBD();
+  // Incluir info de sesión si existe
+  const user = req.session.user || null;
+  let rol = 'Invitado';
+  if (user) {
+    if (user.id_rol == 1) rol = 'Administrador';
+    if (user.id_rol == 2) rol = 'Caja';
+  }
+  res.json({ servidor: true, bd: bdOK, usuario: user ? user.usuario : null, rol: rol });
+});
+
+// Ruta de login
+app.post('/api/login', async (req, res) => {
+  const { usuario, password } = req.body;
+  try {
+    const user = await verificarCredenciales(usuario, password, { pool });
+    if (!user) {
+      return res.status(401).json({ ok: false, error: 'Credenciales inválidas' });
+    }
+    // Guardar en sesión
+    req.session.user = { id: user.id, usuario: user.usuario, id_rol: user.id_rol };
+    let rol = user.id_rol == 1 ? 'Administrador' : 'Caja';
+    return res.json({ ok: true, usuario: user.usuario, rol });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ ok: false, error: 'Error del servidor' });
+  }
+});
+
+// Ejemplo de función para generar hash (solo para la primera vez)
+app.get('/api/generar-hash/:password', async (req, res) => {
+  try {
+    const salt = await bcrypt.genSalt(10);
+    const hash = await bcrypt.hash(req.params.password, salt);
+    res.send({ password: req.params.password, hash: hash, nota: 'Usar este hash en phpMyAdmin para crear el usuario' });
+  } catch (e) {
+    res.status(500).json({ error: 'Error al generar hash' });
+  }
+});
+
+// ---------------- Endpoint para tasa BCV con cache y fallback ----------------
+let _cachedTasa = null;
+let _cachedTasaTs = 0;
+const TASA_CACHE_MS = 1000 * 60 * 5; // 5 minutos
+const fetch = require('node-fetch');
+
+app.get('/api/tasa-bcv', async (req, res) => {
+  const now = Date.now();
+  if (_cachedTasa && (now - _cachedTasaTs) < TASA_CACHE_MS) {
+    return res.json({ tasa: _cachedTasa, source: 'cache' });
+  }
+  try {
+    // Intentar obtener desde URL configurada (ej: BCV real si la proporcionas)
+    if (process.env.BCV_API_URL) {
+      const resp = await fetch(process.env.BCV_API_URL, { timeout: 5000 });
+      const json = await resp.json();
+      // Se asume que la respuesta tiene un campo 'tasa' o 'valor' según la API real.
+      const tasaFromApi = json.tasa || json.valor || json.USD || (json.data && json.data.USD);
+      const tasa = parseFloat(tasaFromApi);
+      if (!isNaN(tasa) && tasa > 0) {
+        _cachedTasa = tasa;
+        _cachedTasaTs = Date.now();
+        return res.json({ tasa: _cachedTasa, source: 'BCV_API_URL' });
+      }
+    }
+    // Fallback: intentar fuente pública (ej. DolarToday JSON como fallback)
+    try {
+      const resp2 = await fetch('https://s3.amazonaws.com/dolartoday/data.json', { timeout: 5000 });
+      const json2 = await resp2.json();
+      const tasaDt = json2 && json2.USD && (json2.USD.transferencia || json2.USD.promedio) || json2.USD && json2.USD.sicad2;
+      const tasa = parseFloat(tasaDt);
+      if (!isNaN(tasa) && tasa > 0) {
+        _cachedTasa = tasa;
+        _cachedTasaTs = Date.now();
+        return res.json({ tasa: _cachedTasa, source: 'dtd-fallback' });
+      }
+    } catch (e) {
+      // no hay fallback exitoso
+    }
+    // Último recurso: valor fijo (fallback)
+    _cachedTasa = 36;
+    _cachedTasaTs = Date.now();
+    return res.json({ tasa: _cachedTasa, source: 'fallback' });
+  } catch (e) {
+    console.error('Error obtener tasa BCV:', e.message);
+    _cachedTasa = 36;
+    _cachedTasaTs = Date.now();
+    res.json({ tasa: _cachedTasa, source: 'error-fallback' });
+  }
+});
+
+
 // ==================== COMPRAS (ADMIN) ====================
 // POST /api/compras: Registrar una compra (talla opcional)
 app.post('/api/compras', requiereRol('administrador'), async (req, res) => {
@@ -28,12 +208,15 @@ app.post('/api/compras', requiereRol('administrador'), async (req, res) => {
         conn.release();
         return res.status(400).json({ ok: false, error: 'Cada item debe tener producto, cantidad y costo.' });
       }
-      // Si idTalla es null, undefined o vacío, insertar NULL
+
+      // Insertar detalle de compra SIN campo id_talla (la tabla detallecompra ya no debe contener id_talla)
       await conn.query(
-        'INSERT INTO detallecompra (id_compra, id_producto, id_talla, cantidad, costo_unitario) VALUES (?, ?, ?, ?, ?)',
-        [id_compra, idProducto, idTalla || null, cantidad, costo]
+        'INSERT INTO detallecompra (id_compra, id_producto, cantidad, costo_unitario) VALUES (?, ?, ?, ?)',
+        [id_compra, idProducto, cantidad, costo]
       );
-      // Actualizar inventario si corresponde (si hay talla, sumar a inventario por talla; si no, sumar a inventario total)
+
+      // Actualizar inventario: si el item especifica idTalla actualizamos inventario por talla,
+      // si no, actualizamos el inventario total del producto
       if (idTalla) {
         // Si existe registro, sumar; si no, crear
         const [invRows] = await conn.query('SELECT cantidad FROM inventario WHERE id_producto = ? AND id_talla = ? LIMIT 1', [idProducto, idTalla]);
@@ -42,6 +225,8 @@ app.post('/api/compras', requiereRol('administrador'), async (req, res) => {
         } else {
           await conn.query('INSERT INTO inventario (id_producto, id_talla, cantidad) VALUES (?, ?, ?)', [idProducto, idTalla, cantidad]);
         }
+        // También ajustar inventario total si existe la columna
+        await conn.query('UPDATE productos SET inventario = inventario + ? WHERE id_producto = ?', [cantidad, idProducto]);
       } else {
         // Sumar a inventario total del producto (columna inventario)
         await conn.query('UPDATE productos SET inventario = inventario + ? WHERE id_producto = ?', [cantidad, idProducto]);
@@ -74,49 +259,6 @@ app.get('/api/compras', requiereRol('administrador'), async (req, res) => {
   }
 });
 
-// Documentación de estados de pago:
-// - "Pagada": La compra fue pagada completamente.
-// - "Pendiente": La compra aún no ha sido pagada (debe dinero al proveedor).
-// - "Parcial": Se ha realizado un pago parcial, pero aún queda saldo pendiente con el proveedor.
-const express = require('express');
-const path = require('path');
-let bcrypt;
-try {
-  // prefer native bcrypt if available
-  bcrypt = require('bcrypt');
-} catch (e) {
-  // fallback to bcryptjs (pure JS) which is already installed
-  bcrypt = require('bcryptjs');
-}
-const { pool, verificarConexiónBD, obtenerProductos } = require('./db'); // db.js con MySQL
-const { verificarCredenciales } = require('./auth');
-const cookieSession = require('cookie-session');
-const app = express();
-
-// Middleware
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-app.use(cookieSession({
-  name: 'session',
-  keys: ['clave-secreta-unica'], // reemplaza por una clave real en producción
-  maxAge: 1000 * 60 * 60 // 1 hora
-}));
-
-// Servir archivos estáticos (front-end)
-app.use(express.static(path.join(__dirname, '..', 'public')));
-
-// Ruta: estado del servidor y BD
-app.get('/api/status', async (req, res) => {
-  const bdOK = await verificarConexiónBD();
-  // Incluir info de sesión si existe
-  const user = req.session.user || null;
-  let rol = 'Invitado';
-  if (user) {
-    if (user.id_rol == 1) rol = 'Administrador';
-    if (user.id_rol == 2) rol = 'Caja';
-  }
-  res.json({ servidor: true, bd: bdOK, usuario: user ? user.usuario : null, rol: rol });
-});
 
 // Endpoint para indicadores del dashboard (ventas del mes, serie por día, rotación básica)
 app.get('/api/dashboard/indicadores', requiereRol('administrador'), async (req, res) => {
@@ -165,46 +307,6 @@ app.get('/api/dashboard/indicadores', requiereRol('administrador'), async (req, 
   }
 });
 
-// Ruta de login
-app.post('/api/login', async (req, res) => {
-  const { usuario, password } = req.body;
-  try {
-    const user = await verificarCredenciales(usuario, password, { pool });
-    if (!user) {
-      return res.status(401).json({ ok: false, error: 'Credenciales inválidas' });
-    }
-    // Guardar en sesión
-    req.session.user = { id: user.id, usuario: user.usuario, id_rol: user.id_rol };
-    let rol = user.id_rol == 1 ? 'Administrador' : 'Caja';
-    return res.json({ ok: true, usuario: user.usuario, rol });
-  } catch (e) {
-    console.error(e);
-    return res.status(500).json({ ok: false, error: 'Error del servidor' });
-  }
-});
-
-// Middleware de autenticación
-function requiereRol(rol) {
-  return (req, res, next) => {
-    const u = req.session && req.session.user;
-    if (!u) return res.status(401).json({ ok: false, error: 'No autenticado' });
-    // Supuestos: id_rol 1 = Administrador, 2 = Caja
-    const esAdmin = u.id_rol == 1;
-    const esCaja = u.id_rol == 2;
-
-    if (rol === 'administrador' && esAdmin) return next();
-    if (rol === 'caja' && esCaja) return next();
-    if (rol === 'cualquiera' && (esAdmin || esCaja)) return next(); // Para rutas generales
-    
-    return res.status(403).json({ ok: false, error: 'Acceso no autorizado' });
-  };
-}
-
-// ---------------- Rutas compartidas: Logout ----------------
-app.post('/api/logout', (req, res) => {
-  req.session = null;
-  res.json({ ok: true });
-});
 
 // ---------------- Administrador (rutas protegidas) ----------------
 // Categorías
@@ -240,7 +342,7 @@ app.put('/api/categorias/:id', requiereRol('administrador'), async (req, res) =>
   if (!nombre || nombre.trim() === '') return res.status(400).json({ success: false, message: 'Nombre requerido' });
   try {
   const [result] = await pool.query('UPDATE categorias SET nombre = ? WHERE id_categoria = ?', [nombre.trim(), id]);
-    if (result.affectedRows > 0) return res.json({ success: true });
+    if (result.affectedRows > 0) return res.json({ ok: true, success: true }); // Ajustado para devolver {ok: true, success: true}
     return res.status(404).json({ success: false, message: 'Categoría no encontrada' });
   } catch (e) {
     console.error('Error editar categoria:', e.message);
@@ -276,6 +378,39 @@ app.delete('/api/proveedores/:id', requiereRol('administrador'), async (req, res
     res.status(500).json({ ok: false, success: false, message: 'Error del servidor al eliminar proveedor' });
   }
 });
+app.get('/api/proveedores', requiereRol('administrador'), async (req, res) => {
+  try {
+  const [rows] = await pool.query('SELECT id_proveedor, nombre FROM proveedores ORDER BY nombre');
+    res.json({ proveedores: rows });
+  } catch (e) {
+    res.status(500).json({ proveedores: [] });
+  }
+});
+// Editar proveedor (PUT)
+app.put('/api/proveedores/:id', requiereRol('administrador'), async (req, res) => {
+  const id = req.params.id;
+  const { nombre, contacto, telefono } = req.body;
+  if (!nombre || nombre.trim() === '') return res.status(400).json({ success: false, message: 'Nombre requerido' });
+  try {
+  const [result] = await pool.query('UPDATE proveedores SET nombre = ?, contacto = ?, telefono = ? WHERE id_proveedor = ?', [nombre.trim(), contacto || null, telefono || null, id]);
+    if (result.affectedRows > 0) return res.json({ ok: true, success: true }); // Ajustado para devolver {ok: true, success: true}
+    return res.status(404).json({ success: false, message: 'Proveedor no encontrado' });
+  } catch (e) {
+    console.error('Error editar proveedor:', e.message);
+    return res.status(500).json({ success: false, message: 'Error del servidor' });
+  }
+});
+app.post('/api/proveedores', requiereRol('administrador'), async (req, res) => {
+  const { nombre, contacto, telefono } = req.body;
+  if (!nombre) return res.json({ ok: false });
+  try {
+  await pool.query('INSERT INTO proveedores (nombre, contacto, telefono) VALUES (?, ?, ?)', [nombre, contacto, telefono]);
+    res.json({ ok: true });
+  } catch (e) {
+    res.json({ ok: false });
+  }
+});
+
 // Tallas
 app.get('/api/tallas', requiereRol('administrador'), async (req, res) => {
   try {
@@ -302,7 +437,7 @@ app.put('/api/tallas/:id', requiereRol('administrador'), async (req, res) => {
   if (!nombre || !ajuste) return res.status(400).json({ success: false, message: 'Nombre y ajuste requeridos' });
   try {
   const [result] = await pool.query('UPDATE tallas SET nombre = ?, ajuste = ?, pecho = ?, cintura = ?, cadera = ?, largo = ? WHERE id_talla = ?', [nombre, ajuste, pecho || null, cintura || null, cadera || null, largo || null, id]);
-    if (result.affectedRows > 0) return res.json({ success: true });
+    if (result.affectedRows > 0) return res.json({ ok: true, success: true }); // Ajustado para devolver {ok: true, success: true}
     return res.status(404).json({ success: false, message: 'Talla no encontrada' });
   } catch (e) {
     console.error('Error editar talla:', e.message);
@@ -357,38 +492,7 @@ app.get('/api/:tipo/validar-eliminacion/:id', requiereRol('administrador'), asyn
     return res.status(500).json({ puedeEliminar: false, message: 'Error del servidor al validar eliminación' });
   }
 });
-app.get('/api/proveedores', requiereRol('administrador'), async (req, res) => {
-  try {
-  const [rows] = await pool.query('SELECT id_proveedor, nombre FROM proveedores ORDER BY nombre');
-    res.json({ proveedores: rows });
-  } catch (e) {
-    res.status(500).json({ proveedores: [] });
-  }
-});
-// Editar proveedor (PUT)
-app.put('/api/proveedores/:id', requiereRol('administrador'), async (req, res) => {
-  const id = req.params.id;
-  const { nombre, contacto, telefono } = req.body;
-  if (!nombre || nombre.trim() === '') return res.status(400).json({ success: false, message: 'Nombre requerido' });
-  try {
-  const [result] = await pool.query('UPDATE proveedores SET nombre = ?, contacto = ?, telefono = ? WHERE id_proveedor = ?', [nombre.trim(), contacto || null, telefono || null, id]);
-    if (result.affectedRows > 0) return res.json({ success: true });
-    return res.status(404).json({ success: false, message: 'Proveedor no encontrado' });
-  } catch (e) {
-    console.error('Error editar proveedor:', e.message);
-    return res.status(500).json({ success: false, message: 'Error del servidor' });
-  }
-});
-app.post('/api/proveedores', requiereRol('administrador'), async (req, res) => {
-  const { nombre, contacto, telefono } = req.body;
-  if (!nombre) return res.json({ ok: false });
-  try {
-  await pool.query('INSERT INTO proveedores (nombre, contacto, telefono) VALUES (?, ?, ?)', [nombre, contacto, telefono]);
-    res.json({ ok: true });
-  } catch (e) {
-    res.json({ ok: false });
-  }
-});
+
 // Nuevo endpoint: Registro de productos completo (usado por admin.html)
 app.post('/api/productos', requiereRol('administrador'), async (req, res) => {
   const { marca, categoria, proveedor, nombre, precio, inventario, cantidades } = req.body;
@@ -423,6 +527,7 @@ app.post('/api/productos', requiereRol('administrador'), async (req, res) => {
     res.status(500).json({ error: 'Error al registrar producto' });
   }
 });
+
 // Listar productos (GET)
 // Obtener producto por ID (GET)
 app.get('/api/admin/productos/:id', requiereRol('administrador'), async (req, res) => {
@@ -449,7 +554,7 @@ app.put('/api/admin/productos/:id', requiereRol('administrador'), async (req, re
     res.json({ ok: false });
   }
 });
-// Eliminar producto (DELETE)
+// Eliminar producto (DELETE) - Ajustado para devolver {ok: true, success: true}
 app.delete('/api/admin/productos/:id', requiereRol('administrador'), async (req, res) => {
   const id = req.params.id;
   let conn;
@@ -531,303 +636,6 @@ app.post('/api/admin/productos', requiereRol('administrador'), async (req, res) 
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: 'Error al crear producto' });
-  }
-});
-
-// ---------------- Caja (rutas protegidas) ----------------
-// Buscar cliente por cédula
-app.get('/api/clientes/buscar', requiereRol('caja'), async (req, res) => {
-  const cedula = req.query.cedula;
-  if (!cedula) return res.json({ cliente: null });
-  try {
-  const [rows] = await pool.query('SELECT id_cliente, nombre, cedula, telefono, email FROM clientes WHERE cedula = ? LIMIT 1', [cedula]);
-    if (rows.length > 0) {
-      res.json({ cliente: rows[0] });
-    } else {
-      res.json({ cliente: null });
-    }
-  } catch (e) {
-    res.json({ cliente: null });
-  }
-});
-// Nuevo endpoint: Registro de ventas completo (usado por caja.html)
-app.post('/api/ventas', requiereRol('caja'), async (req, res) => {
-  const { cliente_nombre, cliente_cedula, cliente_telefono, cliente_email, marca, talla, cantidad, precio_unitario, total_dolar, total_bs, tipo_pago } = req.body;
-
-  // Validación de datos requeridos para el cálculo
-  const cantidadNum = Number(cantidad);
-  const precioNum = Number(precio_unitario);
-  let totalVenta = Number(total_dolar);
-  if (isNaN(totalVenta) || totalVenta === 0) {
-    // Si no viene total_dolar, lo calculamos
-    if (!isNaN(precioNum) && !isNaN(cantidadNum)) {
-      totalVenta = precioNum * cantidadNum;
-    }
-  }
-  if (!cliente_nombre || !cliente_cedula || isNaN(totalVenta) || totalVenta <= 0) {
-    return res.status(400).json({ ok: false, message: 'Datos de venta incompletos o inválidos.' });
-  }
-  let conn;
-  let agotado = false;
-  try {
-    conn = await pool.getConnection();
-    await conn.beginTransaction();
-
-    // 1. Buscar o crear cliente (usando la conexión de la transacción)
-    let id_cliente = null;
-    const [cliRows] = await conn.query('SELECT id_cliente FROM clientes WHERE cedula = ? LIMIT 1', [cliente_cedula]);
-    if (cliRows.length > 0) {
-      id_cliente = cliRows[0].id_cliente;
-    } else {
-      const [cliRes] = await conn.query('INSERT INTO clientes (nombre, cedula, telefono, email) VALUES (?, ?, ?, ?)', [cliente_nombre, cliente_cedula, cliente_telefono || '', cliente_email || '']);
-      id_cliente = cliRes.insertId;
-    }
-
-    // Buscar id_producto por marca (simplificado)
-    const [prodRows] = await conn.query('SELECT id_producto FROM productos WHERE marca = ? LIMIT 1', [marca]);
-    let id_producto = prodRows.length > 0 ? prodRows[0].id_producto : null;
-    // Buscar id_talla
-    const [tallaRows] = await conn.query('SELECT id_talla FROM tallas WHERE nombre = ?', [talla]);
-    let id_talla = tallaRows.length > 0 ? tallaRows[0].id_talla : null;
-
-    // Si tenemos producto y talla, verificar stock por talla
-    if (id_producto && id_talla) {
-      const [invRows] = await conn.query('SELECT cantidad FROM inventario WHERE id_producto = ? AND id_talla = ? LIMIT 1', [id_producto, id_talla]);
-      if (invRows.length === 0) {
-        await conn.rollback();
-        conn.release();
-        return res.status(400).json({ ok: false, message: 'No hay inventario para ese producto/talla.' });
-      }
-      const disponible = Number(invRows[0].cantidad) || 0;
-      if (disponible === 0) {
-        await conn.rollback();
-        conn.release();
-        return res.status(400).json({ ok: false, message: 'No hay unidades disponibles para la talla seleccionada.' });
-      }
-      if (disponible < cantidadNum) {
-        await conn.rollback();
-        conn.release();
-        return res.status(400).json({ ok: false, message: `Stock insuficiente. Disponible: ${disponible}` });
-      }
-      // Si la venta procede y consume todas las unidades disponibles
-      agotado = (disponible - cantidadNum) <= 0;
-    }
-
-    // 2. Registrar venta principal
-    const [ventaRes] = await conn.query(
-      'INSERT INTO ventas (fecha_hora, total_venta, tipo_pago, id_usuario, id_cliente) VALUES (NOW(), ?, ?, ?, ?)',
-      [totalVenta, tipo_pago || 'Efectivo', req.session.user.id, id_cliente]
-    );
-    const id_venta = ventaRes.insertId;
-
-    // 3. Registrar detalle de venta y actualizar inventario si aplica
-    if (id_producto && id_talla) {
-      await conn.query('INSERT INTO detalleventa (id_venta, id_producto, id_talla, cantidad, precio_unitario) VALUES (?, ?, ?, ?, ?)', [id_venta, id_producto, id_talla, cantidadNum, precioNum]);
-      // actualizar inventario por talla (evitar negativos)
-      await conn.query('UPDATE inventario SET cantidad = GREATEST(0, cantidad - ?) WHERE id_producto = ? AND id_talla = ?', [cantidadNum, id_producto, id_talla]);
-      // actualizar stock total en productos (si existe columna inventario)
-      await conn.query('UPDATE productos SET inventario = GREATEST(0, inventario - ?) WHERE id_producto = ?', [cantidadNum, id_producto]);
-    }
-
-    await conn.commit();
-    conn.release();
-    res.json({ ok: true, id_venta, agotado });
-  } catch (e) {
-    if (conn) {
-      try { await conn.rollback(); conn.release(); } catch (_) {}
-    }
-    console.error(e);
-    res.status(500).json({ error: 'Error al registrar venta' });
-  }
-});
-// Endpoint para tasa BCV (simulado)
-app.get('/api/tasa-bcv', async (req, res) => {
-  // Aquí deberías consultar una API real, pero devolvemos un valor fijo de ejemplo
-  res.json({ tasa: 36 });
-});
-// Registro de venta simple (AJUSTADO para coincidir con la llamada simple del front-end)
-app.post('/api/caja/venta', requiereRol('caja'), async (req, res) => {
-  const { id_cliente, monto } = req.body;
-  
-  // Datos simplificados para la venta a través del formulario de "Caja"
-  const total_venta = monto;
-  const tipo_pago = 'Efectivo'; // Valor por defecto
-  
-  try {
-    // 1) Crear venta (en tabla Ventas)
-    const [ventaResult] = await pool.query(
-      `INSERT INTO ventas (fecha_hora, total_venta, tipo_pago, id_usuario, id_cliente)
-       VALUES (NOW(), ?, ?, ?, ?)`,
-      [total_venta, tipo_pago, req.session.user.id, id_cliente || null]
-    );
-    const id_venta = ventaResult.insertId;
-
-    // Aquí no se inserta DetalleVenta ni se actualiza Inventario
-    // porque el formulario del front-end es muy simple,
-    // pero la ruta es funcional y registra la venta principal.
-    
-    res.json({ ok: true, id_venta });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: 'Error al registrar venta' });
-  }
-});
-
-// Ejemplo de función para generar hash (solo para la primera vez)
-app.get('/api/generar-hash/:password', async (req, res) => {
-  try {
-    const salt = await bcrypt.genSalt(10);
-    const hash = await bcrypt.hash(req.params.password, salt);
-    res.send({ password: req.params.password, hash: hash, nota: 'Usar este hash en phpMyAdmin para crear el usuario' });
-  } catch (e) {
-    res.status(500).json({ error: 'Error al generar hash' });
-  }
-});
-
-// ---------------- Rutas públicas para Productos (CAJA y front) ----------------
-// Listado de productos (para Caja) -> incluye tallas y cantidades
-app.get('/api/productos', requiereRol('cualquiera'), async (req, res) => {
-  try {
-    const [rows] = await pool.query('SELECT id_producto, nombre, marca, inventario, precio_venta FROM productos LIMIT 500');
-    // Obtener tallas por producto
-    for (const prod of rows) {
-      const [tallas] = await pool.query(
-        'SELECT inventario.id_talla, tallas.nombre, inventario.cantidad FROM inventario JOIN tallas ON inventario.id_talla = tallas.id_talla WHERE inventario.id_producto = ?',
-        [prod.id_producto]
-      );
-      prod.tallas = tallas.map(t => ({ id_talla: t.id_talla, nombre: t.nombre, cantidad: t.cantidad }));
-    }
-    res.json({ productos: rows });
-  } catch (e) {
-    console.error('Error listar productos publico:', e.message);
-    res.status(500).json({ productos: [] });
-  }
-});
-
-// Obtener producto por id (para Caja)
-app.get('/api/productos/:id', requiereRol('cualquiera'), async (req, res) => {
-  const id = req.params.id;
-  try {
-    const [rows] = await pool.query('SELECT id_producto, nombre, marca, inventario, precio_venta FROM productos WHERE id_producto = ? LIMIT 1', [id]);
-    if (rows.length === 0) return res.json({ producto: null });
-    const prod = rows[0];
-    const [tallas] = await pool.query(
-      'SELECT inventario.id_talla, tallas.nombre, inventario.cantidad FROM inventario JOIN tallas ON inventario.id_talla = tallas.id_talla WHERE inventario.id_producto = ?',
-      [prod.id_producto]
-    );
-    prod.tallas = tallas.map(t => ({ id_talla: t.id_talla, nombre: t.nombre, cantidad: t.cantidad }));
-    res.json({ producto: prod });
-  } catch (e) {
-    console.error('Error obtener producto publico:', e.message);
-    res.status(500).json({ producto: null });
-  }
-});
-
-// ---------------- Endpoint para tasa BCV con cache y fallback ----------------
-let _cachedTasa = null;
-let _cachedTasaTs = 0;
-const TASA_CACHE_MS = 1000 * 60 * 5; // 5 minutos
-const fetch = require('node-fetch');
-
-app.get('/api/tasa-bcv', async (req, res) => {
-  const now = Date.now();
-  if (_cachedTasa && (now - _cachedTasaTs) < TASA_CACHE_MS) {
-    return res.json({ tasa: _cachedTasa, source: 'cache' });
-  }
-  try {
-    // Intentar obtener desde URL configurada (ej: BCV real si la proporcionas)
-    if (process.env.BCV_API_URL) {
-      const resp = await fetch(process.env.BCV_API_URL, { timeout: 5000 });
-      const json = await resp.json();
-      // Se asume que la respuesta tiene un campo 'tasa' o 'valor' según la API real.
-      const tasaFromApi = json.tasa || json.valor || json.USD || (json.data && json.data.USD);
-      const tasa = parseFloat(tasaFromApi);
-      if (!isNaN(tasa) && tasa > 0) {
-        _cachedTasa = tasa;
-        _cachedTasaTs = Date.now();
-        return res.json({ tasa: _cachedTasa, source: 'BCV_API_URL' });
-      }
-    }
-    // Fallback: intentar fuente pública (ej. DolarToday JSON como fallback)
-    try {
-      const resp2 = await fetch('https://s3.amazonaws.com/dolartoday/data.json', { timeout: 5000 });
-      const json2 = await resp2.json();
-      const tasaDt = json2 && json2.USD && (json2.USD.transferencia || json2.USD.promedio) || json2.USD && json2.USD.sicad2;
-      const tasa = parseFloat(tasaDt);
-      if (!isNaN(tasa) && tasa > 0) {
-        _cachedTasa = tasa;
-        _cachedTasaTs = Date.now();
-        return res.json({ tasa: _cachedTasa, source: 'dtd-fallback' });
-      }
-    } catch (e) {
-      // no hay fallback exitoso
-    }
-    // Último recurso: valor fijo (fallback)
-    _cachedTasa = 36;
-    _cachedTasaTs = Date.now();
-    return res.json({ tasa: _cachedTasa, source: 'fallback' });
-  } catch (e) {
-    console.error('Error obtener tasa BCV:', e.message);
-    _cachedTasa = 36;
-    _cachedTasaTs = Date.now();
-    res.json({ tasa: _cachedTasa, source: 'error-fallback' });
-  }
-});
-
-// ---------------- Ventas: validar stock y actualizar inventario ----------------
-// Ajustar para aceptar id_producto e id_talla (requerido) y decrementar inventario
-app.post('/api/ventas', requiereRol('caja'), async (req, res) => {
-  const {
-    cliente_nombre, cliente_cedula, cliente_telefono, cliente_email,
-    id_producto, id_talla, cantidad, precio_unitario, tipo_pago
-  } = req.body;
-
-  if (!id_producto || !id_talla || !cantidad || cantidad <= 0) {
-    return res.status(400).json({ ok: false, message: 'Faltan id_producto, id_talla o cantidad válida.' });
-  }
-
-  try {
-    // 1. Verificar stock en inventario
-    const [invRows] = await pool.query('SELECT cantidad FROM inventario WHERE id_producto = ? AND id_talla = ? LIMIT 1', [id_producto, id_talla]);
-    if (invRows.length === 0) {
-      return res.status(400).json({ ok: false, message: 'No hay inventario para ese producto/talla.' });
-    }
-    const disponible = Number(invRows[0].cantidad) || 0;
-    if (disponible === 0) {
-      return res.status(400).json({ ok: false, message: 'No hay unidades disponibles para la talla seleccionada.' });
-    }
-    if (disponible < cantidad) {
-      return res.status(400).json({ ok: false, message: `Stock insuficiente. Disponible: ${disponible}` });
-    }
-
-    // 2. Buscar o crear cliente
-    let id_cliente = null;
-    const [cliRows] = await pool.query('SELECT id_cliente FROM clientes WHERE cedula = ? LIMIT 1', [cliente_cedula]);
-    if (cliRows.length > 0) {
-      id_cliente = cliRows[0].id_cliente;
-    } else {
-      const [cliRes] = await pool.query('INSERT INTO clientes (nombre, cedula, telefono, email) VALUES (?, ?, ?, ?)', [cliente_nombre, cliente_cedula, cliente_telefono || '', cliente_email || '']);
-      id_cliente = cliRes.insertId;
-    }
-
-    // 3. Registrar venta principal
-    const total_dolar = (precio_unitario || 0) * cantidad;
-    const [ventaRes] = await pool.query('INSERT INTO ventas (fecha_hora, total_venta, tipo_pago, id_usuario, id_cliente) VALUES (NOW(), ?, ?, ?, ?)', [total_dolar, tipo_pago || 'Efectivo', req.session.user.id, id_cliente]);
-    const id_venta = ventaRes.insertId;
-
-    // 4. Registrar detalleventa y actualizar inventario
-    await pool.query('INSERT INTO detalleventa (id_venta, id_producto, id_talla, cantidad, precio_unitario) VALUES (?, ?, ?, ?, ?)', [id_venta, id_producto, id_talla, cantidad, precio_unitario || 0]);
-    // calcular si la venta agotó la talla
-    const agotado = (disponible - cantidad) <= 0;
-    // actualizar inventario por talla (evitar negativos)
-    await pool.query('UPDATE inventario SET cantidad = GREATEST(0, cantidad - ?) WHERE id_producto = ? AND id_talla = ?', [cantidad, id_producto, id_talla]);
-    // actualizar stock total en productos (si existe columna inventario)
-    await pool.query('UPDATE productos SET inventario = GREATEST(0, inventario - ?) WHERE id_producto = ?', [cantidad, id_producto]);
-
-    res.json({ ok: true, id_venta, agotado });
-  } catch (e) {
-    console.error('Error al registrar venta:', e.message);
-    res.status(500).json({ ok: false, message: 'Error al registrar venta' });
   }
 });
 
@@ -985,55 +793,154 @@ app.get('/api/admin/clientes/ventas', requiereRol('administrador'), async (req, 
   }
 });
 
-// ---------------- Ajuste de respuestas en eliminaciones (estandarizar ok / success) ----------------
-// Reescribir / ajustar los deletes existentes para devolver { ok: true, success: true } en caso de éxito
-// ...existing delete routes...
-// (Modifica las rutas existentes ya definidas más arriba: categorías, proveedores, tallas, productos admin)
-// Asegurarse de responder con ok y success para compatibilidad con admin.html
-// Ejemplo: reemplazar 'return res.json({ success: true });' con 'return res.json({ ok: true, success: true });'
-// ...existing code...
-// Para mantener el patch compacto no repetimos todo el código: sustituir las respuestas en cada delete (categorias, proveedores, tallas, productos) como se indicó arriba.
-// ...existing code...
-app.delete('/api/admin/productos/:id', requiereRol('administrador'), async (req, res) => {
-  const id = req.params.id;
-  let conn;
+
+// ---------------- Caja (rutas protegidas) ----------------
+// Buscar cliente por cédula
+app.get('/api/clientes/buscar', requiereRol('caja'), async (req, res) => {
+  const cedula = req.query.cedula;
+  if (!cedula) return res.json({ cliente: null });
   try {
-    // Obtener conexión y comenzar transacción
-    conn = await pool.getConnection();
-    await conn.beginTransaction();
-
-    // 1) Verificar si el producto tiene registros en detalleventa -> si tiene ventas, NO eliminar
-    const [detCountRows] = await conn.query('SELECT COUNT(*) as total FROM detalleventa WHERE id_producto = ?', [id]);
-    const detTotal = (Array.isArray(detCountRows) && detCountRows[0]) ? detCountRows[0].total : (detCountRows.total || 0);
-    if (detTotal > 0) {
-      await conn.rollback();
-      conn.release();
-      return res.status(400).json({ ok: false, success: false, message: `No se puede eliminar: el producto tiene ${detTotal} venta(s) registrada(s)` });
+  const [rows] = await pool.query('SELECT id_cliente, nombre, cedula, telefono, email FROM clientes WHERE cedula = ? LIMIT 1', [cedula]);
+    if (rows.length > 0) {
+      res.json({ cliente: rows[0] });
+    } else {
+      res.json({ cliente: null });
     }
-
-    // 2) Eliminar filas relacionadas en inventario (si existen)
-    await conn.query('DELETE FROM inventario WHERE id_producto = ?', [id]);
-
-    // 3) Eliminar el producto
-    const [delRes] = await conn.query('DELETE FROM productos WHERE id_producto = ?', [id]);
-    if (delRes.affectedRows === 0) {
-      await conn.rollback();
-      conn.release();
-      return res.status(404).json({ ok: false, success: false, message: 'Producto no encontrado' });
-    }
-
-    // Commit y liberar
-    await conn.commit();
-    conn.release();
-    return res.json({ ok: true, success: true });
   } catch (e) {
-    if (conn) {
-      try { await conn.rollback(); conn.release(); } catch (_) {}
-    }
-    console.error('Error eliminar producto admin (transaction):', e.message || e);
-    return res.status(500).json({ ok: false, success: false, message: 'Error del servidor al eliminar producto' });
+    res.json({ cliente: null });
   }
 });
+
+// Registro de venta simple (AJUSTADO para coincidir con la llamada simple del front-end)
+app.post('/api/caja/venta', requiereRol('caja'), async (req, res) => {
+  const { id_cliente, monto } = req.body;
+  
+  // Datos simplificados para la venta a través del formulario de "Caja"
+  const total_venta = monto;
+  const tipo_pago = 'Efectivo'; // Valor por defecto
+  
+  try {
+    // 1) Crear venta (en tabla Ventas)
+    const [ventaResult] = await pool.query(
+      `INSERT INTO ventas (fecha_hora, total_venta, tipo_pago, id_usuario, id_cliente)
+       VALUES (NOW(), ?, ?, ?, ?)`,
+      [total_venta, tipo_pago, req.session.user.id, id_cliente || null]
+    );
+    const id_venta = ventaResult.insertId;
+
+    // Aquí no se inserta DetalleVenta ni se actualiza Inventario
+    // porque el formulario del front-end es muy simple,
+    // pero la ruta es funcional y registra la venta principal.
+    
+    res.json({ ok: true, id_venta });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Error al registrar venta' });
+  }
+});
+
+
+// ---------------- Ventas: validar stock y actualizar inventario ----------------
+// Ajustar para aceptar id_producto e id_talla (requerido) y decrementar inventario
+// (Esta ruta reemplaza la primera ruta fallida /api/ventas que estaba mezclada con la lógica antigua)
+app.post('/api/ventas', requiereRol('caja'), async (req, res) => {
+  const {
+    cliente_nombre, cliente_cedula, cliente_telefono, cliente_email,
+    id_producto, id_talla, cantidad, precio_unitario, tipo_pago
+  } = req.body;
+
+  if (!id_producto || !id_talla || !cantidad || cantidad <= 0) {
+    return res.status(400).json({ ok: false, message: 'Faltan id_producto, id_talla o cantidad válida.' });
+  }
+
+  try {
+    // 1. Verificar stock en inventario
+    const [invRows] = await pool.query('SELECT cantidad FROM inventario WHERE id_producto = ? AND id_talla = ? LIMIT 1', [id_producto, id_talla]);
+    if (invRows.length === 0) {
+      return res.status(400).json({ ok: false, message: 'No hay inventario para ese producto/talla.' });
+    }
+    const disponible = Number(invRows[0].cantidad) || 0;
+    if (disponible === 0) {
+      return res.status(400).json({ ok: false, message: 'No hay unidades disponibles para la talla seleccionada.' });
+    }
+    const cantidadNum = Number(cantidad);
+    const precioNum = Number(precio_unitario) || 0;
+
+    if (disponible < cantidadNum) {
+      return res.status(400).json({ ok: false, message: `Stock insuficiente. Disponible: ${disponible}` });
+    }
+
+    // 2. Buscar o crear cliente
+    let id_cliente = null;
+    const [cliRows] = await pool.query('SELECT id_cliente FROM clientes WHERE cedula = ? LIMIT 1', [cliente_cedula]);
+    if (cliRows.length > 0) {
+      id_cliente = cliRows[0].id_cliente;
+    } else {
+      const [cliRes] = await pool.query('INSERT INTO clientes (nombre, cedula, telefono, email) VALUES (?, ?, ?, ?)', [cliente_nombre, cliente_cedula, cliente_telefono || '', cliente_email || '']);
+      id_cliente = cliRes.insertId;
+    }
+
+    // 3. Registrar venta principal
+    const total_dolar = precioNum * cantidadNum;
+    const [ventaRes] = await pool.query('INSERT INTO ventas (fecha_hora, total_venta, tipo_pago, id_usuario, id_cliente) VALUES (NOW(), ?, ?, ?, ?)', [total_dolar, tipo_pago || 'Efectivo', req.session.user.id, id_cliente]);
+    const id_venta = ventaRes.insertId;
+
+    // 4. Registrar detalleventa y actualizar inventario
+    await pool.query('INSERT INTO detalleventa (id_venta, id_producto, id_talla, cantidad, precio_unitario) VALUES (?, ?, ?, ?, ?)', [id_venta, id_producto, id_talla, cantidadNum, precioNum]);
+    // calcular si la venta agotó la talla
+    const agotado = (disponible - cantidadNum) <= 0;
+    // actualizar inventario por talla (evitar negativos)
+    await pool.query('UPDATE inventario SET cantidad = GREATEST(0, cantidad - ?) WHERE id_producto = ? AND id_talla = ?', [cantidadNum, id_producto, id_talla]);
+    // actualizar stock total en productos (si existe columna inventario)
+    await pool.query('UPDATE productos SET inventario = GREATEST(0, inventario - ?) WHERE id_producto = ?', [cantidadNum, id_producto]);
+
+    res.json({ ok: true, id_venta, agotado });
+  } catch (e) {
+    console.error('Error al registrar venta:', e.message);
+    res.status(500).json({ ok: false, message: 'Error al registrar venta' });
+  }
+});
+
+
+// ---------------- Rutas públicas para Productos (CAJA y front) ----------------
+// Listado de productos (para Caja) -> incluye tallas y cantidades
+app.get('/api/productos', requiereRol('cualquiera'), async (req, res) => {
+  try {
+    const [rows] = await pool.query('SELECT id_producto, nombre, marca, inventario, precio_venta FROM productos LIMIT 500');
+    // Obtener tallas por producto
+    for (const prod of rows) {
+      const [tallas] = await pool.query(
+        'SELECT inventario.id_talla, tallas.nombre, inventario.cantidad FROM inventario JOIN tallas ON inventario.id_talla = tallas.id_talla WHERE inventario.id_producto = ?',
+        [prod.id_producto]
+      );
+      prod.tallas = tallas.map(t => ({ id_talla: t.id_talla, nombre: t.nombre, cantidad: t.cantidad }));
+    }
+    res.json({ productos: rows });
+  } catch (e) {
+    console.error('Error listar productos publico:', e.message);
+    res.status(500).json({ productos: [] });
+  }
+});
+
+// Obtener producto por id (para Caja)
+app.get('/api/productos/:id', requiereRol('cualquiera'), async (req, res) => {
+  const id = req.params.id;
+  try {
+    const [rows] = await pool.query('SELECT id_producto, nombre, marca, inventario, precio_venta FROM productos WHERE id_producto = ? LIMIT 1', [id]);
+    if (rows.length === 0) return res.json({ producto: null });
+    const prod = rows[0];
+    const [tallas] = await pool.query(
+      'SELECT inventario.id_talla, tallas.nombre, inventario.cantidad FROM inventario JOIN tallas ON inventario.id_talla = tallas.id_talla WHERE inventario.id_producto = ?',
+      [prod.id_producto]
+    );
+    prod.tallas = tallas.map(t => ({ id_talla: t.id_talla, nombre: t.nombre, cantidad: t.cantidad }));
+    res.json({ producto: prod });
+  } catch (e) {
+    console.error('Error obtener producto publico:', e.message);
+    res.status(500).json({ producto: null });
+  }
+});
+
 
 // Inicio del servidor
 const PORT = process.env.PORT || 3000;
