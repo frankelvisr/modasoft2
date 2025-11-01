@@ -5,26 +5,57 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
     <title>ERP simple - Administración</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="admin.min.css">
+    <link rel="stylesheet" href="admin.css">
     <script>
     function switchTab(tab) {
-        document.getElementById('inventarioPanel').style.display = 'none';
-        document.getElementById('catalogoPanel').style.display = 'none';
-        document.getElementById('transaccionesPanel').style.display = 'none';
-        document.getElementById('tab-inventario').classList.remove('active');
-        document.getElementById('tab-catalogo').classList.remove('active');
-        document.getElementById('tab-transacciones').classList.remove('active');
-        if (tab === 'inventario') {
-            document.getElementById('inventarioPanel').style.display = 'block';
-            document.getElementById('tab-inventario').classList.add('active');
-        }
-        if (tab === 'catalogo') {
-            document.getElementById('catalogoPanel').style.display = 'block';
-            document.getElementById('tab-catalogo').classList.add('active');
-        }
-        if (tab === 'transacciones') {
-            document.getElementById('transaccionesPanel').style.display = 'block';
-            document.getElementById('tab-transacciones').classList.add('active');
+        // Ocultar todos los paneles
+        const panels = ['dashboardPanel', 'inventarioPanel', 'comprasPanel', 'ventasPanel', 'clientesPanel', 
+                       'catalogoPanel', 'promocionesPanel', 'contabilidadPanel', 'cuentas_pagarPanel', 
+                       'cajaPanel', 'conciliacionPanel', 'reportesPanel'];
+        const sidebarLinks = document.querySelectorAll('.sidebar-menu-link');
+        
+        panels.forEach(panelId => {
+            const panel = document.getElementById(panelId);
+            if (panel) panel.style.display = 'none';
+        });
+        
+        sidebarLinks.forEach(link => link.classList.remove('active'));
+        
+        // Mostrar panel seleccionado
+        const panelMap = {
+            'dashboard': ['dashboardPanel', 'dashboard'],
+            'inventario': ['inventarioPanel', 'inventario'],
+            'compras': ['comprasPanel', 'compras'],
+            'ventas': ['ventasPanel', 'ventas'],
+            'clientes': ['clientesPanel', 'clientes'],
+            'catalogo': ['catalogoPanel', 'catalogo'],
+            'promociones': ['promocionesPanel', 'promociones'],
+            'contabilidad': ['contabilidadPanel', 'contabilidad'],
+            'cuentas_pagar': ['cuentas_pagarPanel', 'cuentas_pagar'],
+            'caja': ['cajaPanel', 'caja'],
+            'conciliacion': ['conciliacionPanel', 'conciliacion'],
+            'reportes': ['reportesPanel', 'reportes']
+        };
+        
+        if (panelMap[tab]) {
+            const [panelId, linkTab] = panelMap[tab];
+            const panelEl = document.getElementById(panelId);
+            if (panelEl) {
+                panelEl.style.display = 'flex';
+                panelEl.style.flexDirection = 'column';
+            }
+            
+            // Activar link del sidebar
+            sidebarLinks.forEach(link => {
+                if (link.getAttribute('onclick') && link.getAttribute('onclick').includes(linkTab)) {
+                    link.classList.add('active');
+                }
+            });
+            
+            // Cargar datos del dashboard si se selecciona
+            if (tab === 'dashboard') {
+                cargarDashboardData();
+            }
         }
     }
     function switchCatalogTab(tab) {
@@ -276,12 +307,12 @@
     }
 
     window.onload = function() {
-        switchTab('inventario');
+        switchTab('dashboard'); // Dashboard como página principal
         // Inicializa el submenú de Catálogos
         switchCatalogTab('categorias');
         
-        // Cargar productos al iniciar
-        cargarProductos();
+        // Los productos se cargan automáticamente desde cliente.js
+        cargarDashboardData(); // Cargar datos del dashboard
         
         // Inicializar listeners para botones de acción en las listas
         ['Categorias', 'Tallas', 'Proveedores'].forEach(function(tipo) {
@@ -322,36 +353,118 @@
         });
     };
 
-    async function cargarProductos() {
+    // Función para cargar datos del dashboard
+    async function cargarDashboardData() {
         try {
-            const response = await fetch('/api/productos');
-            const data = await response.json();
+            const res = await fetch('/api/dashboard/indicadores');
+            const data = await res.json();
             
-            const contenedor = document.getElementById('adminProductos');
-            if (data.length === 0) {
-                contenedor.innerHTML = '<div class="item">No hay productos registrados</div>';
-                return;
+            if (data.ventasMes !== undefined) {
+                document.getElementById('ventasMes').textContent = '$' + parseFloat(data.ventasMes).toFixed(2);
+                const cambio = data.ventasCambio || 0;
+                const cambioEl = document.getElementById('ventasCambio');
+                cambioEl.textContent = (cambio >= 0 ? '↑' : '↓') + ' ' + Math.abs(cambio).toFixed(1) + '%';
+                cambioEl.className = cambio >= 0 ? 'dashboard-card-change positive' : 'dashboard-card-change negative';
+            }
+            
+            if (data.rotacionInventario !== undefined) {
+                document.getElementById('rotacionInv').textContent = parseFloat(data.rotacionInventario).toFixed(2);
+            }
+            
+            if (data.margenGanancia !== undefined) {
+                document.getElementById('margenGanancia').textContent = parseFloat(data.margenGanancia).toFixed(1) + '%';
+            }
+            
+            if (data.stockBajo !== undefined) {
+                document.getElementById('stockBajo').textContent = data.stockBajo;
             }
 
-            contenedor.innerHTML = data.map(producto => `
-                <div class="item" data-id="${producto.id}">
-                    <div class="producto-info">
-                        <strong>${producto.marca} - ${producto.nombre}</strong><br>
-                        Categoría: ${producto.categoria}<br>
-                        Precio: $${producto.precio} | Stock: ${producto.inventario}
-                    </div>
-                    <div class="actions">
-                        <button class="btn btn-small" onclick="editarProducto('${producto.id}')">Editar</button>
-                        <button class="btn btn-small secondary" onclick="mostrarConfirmacion('${producto.id}', 'productos', '${producto.nombre}')">Eliminar</button>
-                    </div>
-                </div>
-            `).join('');
+            // Cargar gráfico de ventas
+            if (data.ventasTemporada) {
+                cargarGraficoVentas(data.ventasTemporada);
+            }
+
+            // Cargar gráfico de márgenes
+            if (data.margenesCategoria) {
+                cargarGraficoMargenes(data.margenesCategoria);
+            }
+
+            // Cargar tabla de utilidad
+            if (data.utilidadProductos) {
+                cargarTablaUtilidad(data.utilidadProductos);
+            }
 
         } catch (error) {
-            console.error('Error al cargar productos:', error);
-            document.getElementById('adminProductos').innerHTML = 
-                '<div class="item">Error al cargar los productos</div>';
+            console.error('Error cargando dashboard:', error);
         }
+    }
+
+    // Función para cargar gráfico de ventas
+    function cargarGraficoVentas(datos) {
+        const canvas = document.getElementById('ventasChart');
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        
+        // Implementación simple de gráfico (mejorar con Chart.js si se desea)
+        const width = canvas.width = canvas.offsetWidth;
+        const height = canvas.height = 300;
+        
+        ctx.clearRect(0, 0, width, height);
+        ctx.strokeStyle = '#2563eb';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        
+        const max = Math.max(...datos.map(d => d.ingreso_total || 0));
+        const stepX = width / datos.length;
+        
+        datos.forEach((d, i) => {
+            const x = i * stepX;
+            const y = height - (d.ingreso_total / max) * height * 0.8 - 20;
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+        });
+        
+        ctx.stroke();
+    }
+
+    // Función para cargar gráfico de márgenes
+    function cargarGraficoMargenes(datos) {
+        const canvas = document.getElementById('margenChart');
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        
+        const width = canvas.width = canvas.offsetWidth;
+        const height = canvas.height = 300;
+        
+        ctx.clearRect(0, 0, width, height);
+        
+        const max = Math.max(...datos.map(d => d.margen_promedio || 0));
+        const barWidth = width / datos.length - 10;
+        
+        datos.forEach((d, i) => {
+            const x = i * (barWidth + 10) + 5;
+            const barHeight = (d.margen_promedio / max) * height * 0.8;
+            const y = height - barHeight - 20;
+            
+            ctx.fillStyle = '#10b981';
+            ctx.fillRect(x, y, barWidth, barHeight);
+        });
+    }
+
+    // Función para cargar tabla de utilidad
+    function cargarTablaUtilidad(datos) {
+        const tbody = document.getElementById('tbodyUtilidad');
+        if (!tbody) return;
+        
+        const top10 = datos.slice(0, 10);
+        tbody.innerHTML = top10.map(prod => `
+            <tr style="border-bottom:1px solid var(--surface-alt);">
+                <td style="padding:var(--spacing-md);">${prod.nombre || prod.marca || 'N/A'}</td>
+                <td style="padding:var(--spacing-md);text-align:right;">$${parseFloat(prod.total_ventas || 0).toFixed(2)}</td>
+                <td style="padding:var(--spacing-md);text-align:right;">$${parseFloat(prod.utilidad_total || 0).toFixed(2)}</td>
+                <td style="padding:var(--spacing-md);text-align:right;">${parseFloat(prod.margen_ganancia || 0).toFixed(1)}%</td>
+            </tr>
+        `).join('');
     }
 
     // Función para buscar productos
@@ -390,19 +503,141 @@
     </script>
 </head>
 <body>
-    <div id="app" class="container">
-        <!-- DEMO: barra rápida para verificar estilos -->
-        <div class="card" style="margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
-            <div>
-                <div class="breadcrumbs muted">Admin / Panel</div>
-                <h2 style="margin:6px 0 0">Panel de Administración — Demostración</h2>
-                <div class="muted" style="font-size:0.95rem">Este bloque sirve para comprobar la tipografía, colores y espaciado.</div>
+    <div class="app-layout">
+        <!-- Sidebar de navegación -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <div class="sidebar-logo">MS</div>
+                <div class="sidebar-title">Modasoft ERP</div>
             </div>
-            <div class="actions">
-                <button class="btn btn-primary">Acción principal</button>
-                <button class="btn btn-ghost">Secundaria</button>
+            <nav class="sidebar-nav">
+                <div class="sidebar-section">
+                    <div class="sidebar-section-title">General</div>
+                    <ul class="sidebar-menu">
+                        <li class="sidebar-menu-item">
+                            <a href="#" class="sidebar-menu-link active" onclick="switchTab('dashboard'); return false;">
+                                <span class="sidebar-menu-icon">📊</span>
+                                <span>Dashboard</span>
+                            </a>
+                        </li>
+                    </ul>
+            </div>
+                <div class="sidebar-section">
+                    <div class="sidebar-section-title">Operaciones</div>
+                    <ul class="sidebar-menu">
+                        <li class="sidebar-menu-item">
+                            <a href="#" class="sidebar-menu-link" onclick="switchTab('inventario'); return false;">
+                                <span class="sidebar-menu-icon">📦</span>
+                                <span>Inventario</span>
+                            </a>
+                        </li>
+                        <li class="sidebar-menu-item">
+                            <a href="#" class="sidebar-menu-link" onclick="switchTab('compras'); return false;">
+                                <span class="sidebar-menu-icon">🛒</span>
+                                <span>Compras</span>
+                            </a>
+                        </li>
+                        <li class="sidebar-menu-item">
+                            <a href="#" class="sidebar-menu-link" onclick="switchTab('ventas'); return false;">
+                                <span class="sidebar-menu-icon">💵</span>
+                                <span>Ventas</span>
+                            </a>
+                        </li>
+                        <li class="sidebar-menu-item">
+                            <a href="#" class="sidebar-menu-link" onclick="switchTab('clientes'); return false;">
+                                <span class="sidebar-menu-icon">👥</span>
+                                <span>Clientes</span>
+                            </a>
+                        </li>
+                    </ul>
+        </div>
+                <div class="sidebar-section">
+                    <div class="sidebar-section-title">Configuración</div>
+                    <ul class="sidebar-menu">
+                        <li class="sidebar-menu-item">
+                            <a href="#" class="sidebar-menu-link" onclick="switchTab('catalogo'); return false;">
+                                <span class="sidebar-menu-icon">📋</span>
+                                <span>Catálogos</span>
+                            </a>
+                        </li>
+                        <li class="sidebar-menu-item">
+                            <a href="#" class="sidebar-menu-link" onclick="switchTab('promociones'); return false;">
+                                <span class="sidebar-menu-icon">🎁</span>
+                                <span>Promociones</span>
+                            </a>
+                        </li>
+                    </ul>
+                </div>
+                <div class="sidebar-section">
+                    <div class="sidebar-section-title">Contabilidad</div>
+                    <ul class="sidebar-menu">
+                        <li class="sidebar-menu-item">
+                            <a href="#" class="sidebar-menu-link" onclick="switchTab('contabilidad'); return false;">
+                                <span class="sidebar-menu-icon">💰</span>
+                                <span>Contabilidad</span>
+                            </a>
+                        </li>
+                        <li class="sidebar-menu-item">
+                            <a href="#" class="sidebar-menu-link" onclick="switchTab('cuentas_pagar'); return false;">
+                                <span class="sidebar-menu-icon">📝</span>
+                                <span>Cuentas por Pagar</span>
+                            </a>
+                        </li>
+                        <li class="sidebar-menu-item">
+                            <a href="#" class="sidebar-menu-link" onclick="switchTab('caja'); return false;">
+                                <span class="sidebar-menu-icon">🏦</span>
+                                <span>Control de Caja</span>
+                            </a>
+                        </li>
+                        <li class="sidebar-menu-item">
+                            <a href="#" class="sidebar-menu-link" onclick="switchTab('conciliacion'); return false;">
+                                <span class="sidebar-menu-icon">🔄</span>
+                                <span>Conciliación Bancaria</span>
+                            </a>
+                        </li>
+                    </ul>
+                </div>
+                <div class="sidebar-section">
+                    <div class="sidebar-section-title">Reportes</div>
+                    <ul class="sidebar-menu">
+                        <li class="sidebar-menu-item">
+                            <a href="#" class="sidebar-menu-link" onclick="switchTab('reportes'); return false;">
+                                <span class="sidebar-menu-icon">📊</span>
+                                <span>Reportes</span>
+                            </a>
+                        </li>
+                    </ul>
+                </div>
+            </nav>
+        </aside>
+
+        <!-- Contenido principal -->
+        <div class="main-content">
+            <!-- Header superior -->
+            <header class="top-header">
+                <div class="top-header-left">
+                    <div class="search-box">
+                        <span>🔍</span>
+                        <input type="text" placeholder="Buscar en el sistema...">
+                    </div>
+                </div>
+                <div class="top-header-right">
+                    <div class="header-icon" title="Calendario">📅</div>
+                    <div class="header-icon" title="Notificaciones">
+                        🔔
+                        <span class="notification-badge">2</span>
+                    </div>
+                    <div class="user-avatar" id="userAvatar">A</div>
+                    <div id="userPanel" style="display:flex;align-items:center;gap:8px;">
+                        <span id="userName" class="badge">Usuario</span>
+                        <span id="rolLabel" class="badge role-badge">ADMIN</span>
+                        <button id="logoutBtn" class="btn secondary">Cerrar sesión</button>
             </div>
         </div>
+            </header>
+
+            <!-- Contenido scrollable -->
+            <div class="content-wrapper">
         <!-- Modal de confirmación para eliminar -->
         <div id="modalConfirmarEliminar" style="display:none;position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.4);z-index:1000;align-items:center;justify-content:center;">
             <div style="background:#fff;padding:30px;border-radius:8px;max-width:400px;margin:auto;position:relative;">
@@ -499,30 +734,89 @@
                 </form>
             </div>
         </div>
-        <header class="header">
-            <h1>ERP simple - Panel de Administración</h1>
-            <div id="statusDisplay" class="status-msg">Conectado</div>
-            
-            <div id="userPanel" class="user-panel">
-                <!-- Estos valores se llenarán con JS al cargar la página -->
-                <span id="userName" class="badge">Usuario</span>
-                <span id="rolLabel" class="badge role-badge">ADMIN</span>
-                <button id="logoutBtn" class="btn secondary">Cerrar sesión</button>
+                <!-- DASHBOARD GERENCIAL (Página Principal) -->
+                <div id="dashboardPanel" class="panel tabContent" style="display:flex;flex-direction:column;">
+                    <h2 style="margin-bottom:var(--spacing-xl);">Dashboard Gerencial</h2>
+                    
+                    <!-- Tarjetas de indicadores -->
+                    <div class="dashboard-grid">
+                        <div class="dashboard-card gradient-blue">
+                            <div class="dashboard-card-icon">💰</div>
+                            <div class="dashboard-card-title">Ventas del Mes</div>
+                            <div class="dashboard-card-value" id="ventasMes">$0.00</div>
+                            <div class="dashboard-card-change positive" id="ventasCambio">Cargando...</div>
             </div>
-        </header>
+                        <div class="dashboard-card gradient-teal">
+                            <div class="dashboard-card-icon">📦</div>
+                            <div class="dashboard-card-title">Rotación de Inventario</div>
+                            <div class="dashboard-card-value" id="rotacionInv">0.0</div>
+                            <div class="dashboard-card-change">Indicador mensual</div>
+                        </div>
+                        <div class="dashboard-card gradient-dark">
+                            <div class="dashboard-card-icon">📈</div>
+                            <div class="dashboard-card-title">Margen de Ganancia</div>
+                            <div class="dashboard-card-value" id="margenGanancia">0%</div>
+                            <div class="dashboard-card-change">Promedio general</div>
+                        </div>
+                        <div class="dashboard-card" style="background:var(--surface);">
+                            <div class="dashboard-card-icon" style="color:var(--warning);">⚠️</div>
+                            <div class="dashboard-card-title" style="color:var(--text-secondary);">Stock Bajo</div>
+                            <div class="dashboard-card-value" style="color:var(--text-primary);" id="stockBajo">0</div>
+                            <div class="dashboard-card-change" style="color:var(--text-muted);">Productos con bajo inventario</div>
+                        </div>
+            </div>
 
-        <main id="panelSection" class="card">
-            <h2 class="section-title">Panel de Control Principal</h2>
-            
-            <!-- MENÚ DE NAVEGACIÓN POR PESTAÑAS -->
-            <nav class="tab-nav">
-                <button id="tab-inventario" class="active" onclick="switchTab('inventario')">Gestión de Inventario</button>
-                <button id="tab-catalogo" onclick="switchTab('catalogo')">Catálogos (Tallas, Categorías, Proveedores)</button>
-                <button id="tab-transacciones" onclick="switchTab('transacciones')">Transacciones y Reportes (Ventas, Clientes, Caja)</button>
-            </nav>
+                    <!-- Gráficos -->
+                    <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(500px, 1fr));gap:var(--spacing-lg);">
+                        <div class="chart-container">
+                            <div class="chart-header">
+                                <h4 class="chart-title">Análisis de Ventas por Temporada</h4>
+                                <select id="selectTemporada" class="input" style="width:auto;">
+                                    <option value="actual">Mes Actual</option>
+                                    <option value="anterior">Mes Anterior</option>
+                                    <option value="trimestre">Último Trimestre</option>
+                                    <option value="anual">Año Actual</option>
+                                </select>
+                            </div>
+                            <div class="chart-canvas">
+                                <canvas id="ventasChart"></canvas>
+                            </div>
+                        </div>
+                        <div class="chart-container">
+                            <div class="chart-header">
+                                <h4 class="chart-title">Margen de Ganancia por Categoría</h4>
+                            </div>
+                            <div class="chart-canvas">
+                                <canvas id="margenChart"></canvas>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Indicadores adicionales -->
+                    <div class="chart-container">
+                        <div class="chart-header">
+                            <h4 class="chart-title">Utilidad por Producto (Top 10)</h4>
+                        </div>
+                        <div id="tablaUtilidad" style="overflow-x:auto;">
+                            <table style="width:100%;border-collapse:collapse;">
+                                <thead>
+                                    <tr style="background:var(--surface-alt);border-bottom:2px solid var(--surface-alt);">
+                                        <th style="padding:var(--spacing-md);text-align:left;">Producto</th>
+                                        <th style="padding:var(--spacing-md);text-align:right;">Ventas</th>
+                                        <th style="padding:var(--spacing-md);text-align:right;">Utilidad</th>
+                                        <th style="padding:var(--spacing-md);text-align:right;">Margen %</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="tbodyUtilidad">
+                                    <tr><td colspan="4" style="padding:var(--spacing-md);text-align:center;">Cargando datos...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
             
             <!-- 1. GESTIÓN DE INVENTARIO Y PRODUCTOS -->
-            <div id="inventarioPanel" class="panel tabContent" style="display:block;">
+            <div id="inventarioPanel" class="panel tabContent" style="display:none;">
                 <h3>Gestión de Productos</h3>
                 <div class="row header-row">
                                         <h4>Crear Producto</h4>
@@ -570,15 +864,9 @@
                 <div class="row header-row">
                     <h4>Listado de Productos</h4>
                 </div>
-                <div class="row form-row">
-                    <div class="col">
-                        <input id="prodBuscar" placeholder="Buscar por nombre" class="input">
+                <div class="list-search">
+                    <input id="prodBuscar" placeholder="Buscar productos por nombre o marca..." class="input" type="text">
                     </div>
-                    <div class="col" style="flex: 0 0 auto;">
-                        <button id="btnBuscarProd" class="btn secondary">Buscar</button>
-                    </div>
-                </div>
-                
                 <div id="adminProductos" class="list">
                     <div class="item">Cargando lista de productos...</div>
                 </div>
@@ -606,6 +894,9 @@
                             <button id="btnCrearCat" class="btn primary" type="submit">Crear Categoría</button>
                         </div>
                     </form>
+                    <div class="list-search">
+                        <input id="buscarCategoria" placeholder="Buscar categorías..." class="input" type="text">
+                    </div>
                     <div id="catalogoCategorias" class="list scroll-list">
                         <div class="item"><span>Cargando categorías...</span><div class="actions"><button class="btn btn-small">Editar</button><button class="btn btn-small secondary">Eliminar</button></div></div>
                     </div>
@@ -642,6 +933,9 @@
                             <button id="btnCrearTalla" class="btn primary" type="submit">Crear Talla</button>
                         </div>
                     </form>
+                    <div class="list-search">
+                        <input id="buscarTalla" placeholder="Buscar tallas..." class="input" type="text">
+                    </div>
                     <div id="catalogoTallas" class="list scroll-list">
                         <div class="item"><span>Cargando tallas...</span><div class="actions"><button class="btn btn-small">Editar</button><button class="btn btn-small secondary">Eliminar</button></div></div>
                     </div>
@@ -664,6 +958,9 @@
                             <button id="btnCrearProv" class="btn primary" type="submit">Crear Proveedor</button>
                         </div>
                     </form>
+                    <div class="list-search">
+                        <input id="buscarProveedor" placeholder="Buscar proveedores..." class="input" type="text">
+                    </div>
                     <div id="catalogoProveedores" class="list scroll-list">
                         <div class="item"><span>Cargando proveedores...</span><div class="actions"><button class="btn btn-small">Editar</button><button class="btn btn-small secondary">Eliminar</button></div></div>
                     </div>
@@ -683,21 +980,33 @@
                 </ul>
                 <!-- Placeholder para Ventas -->
                 <h3>Listado de Ventas (Facturas)</h3>
+                <div class="list-search">
+                    <input id="buscarVenta" placeholder="Buscar ventas..." class="input" type="text">
+                </div>
                 <div id="reporteVentas" class="list">
                     <div class="item">Cargando ventas recientes...</div>
                 </div>
                 <!-- Placeholder para Movimientos de Caja -->
                 <h3>Movimientos Contables y de Caja</h3>
+                <div class="list-search">
+                    <input id="buscarCaja" placeholder="Buscar movimientos de caja..." class="input" type="text">
+                </div>
                 <div id="reporteCaja" class="list">
                     <div class="item">Cargando movimientos contables...</div>
                 </div>
                 <!-- Placeholder para Clientes -->
                 <h3>Listado de Clientes</h3>
+                <div class="list-search">
+                    <input id="buscarCliente" placeholder="Buscar clientes..." class="input" type="text">
+                </div>
                 <div id="reporteClientes" class="list">
                     <div class="item">Cargando lista de clientes...</div>
                 </div>
                 <!-- Placeholder para Compras -->
                 <h3>Listado de Órdenes de Compra</h3>
+                <div class="list-search">
+                    <input id="buscarCompra" placeholder="Buscar órdenes de compra..." class="input" type="text">
+                </div>
                 <div id="reporteCompras" class="list">
                     <div class="item">Cargando lista de compras...</div>
                 </div>
@@ -714,8 +1023,307 @@
                 </div>
             </div>
             
-        </main>
+            <!-- PANEL DE COMPRAS -->
+            <div id="comprasPanel" class="panel tabContent" style="display:none;">
+                <h3>Gestión de Compras</h3>
+                <div class="row header-row">
+                    <h4>Registrar Nueva Compra</h4>
+                </div>
+                <form id="form-compra">
+                    <div class="row form-row">
+                        <div class="col">
+                            <label>Proveedor</label>
+                            <select id="compraProveedor" class="input" required>
+                                <option value="">Selecciona Proveedor</option>
+                            </select>
+                        </div>
+                        <div class="col">
+                            <label>Fecha de Compra</label>
+                            <input type="date" id="compraFecha" class="input" required>
+                        </div>
+                        <div class="col">
+                            <label>Estado de Pago</label>
+                            <select id="compraEstadoPago" class="input" required>
+                                <option value="Pendiente">Pendiente</option>
+                                <option value="Parcial">Parcial</option>
+                                <option value="Pagada">Pagada</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="row header-row">
+                        <h4>Productos de la Compra</h4>
+                    </div>
+                    <div id="compraItems" class="list" style="max-height:300px;">
+                        <div class="item">Agrega productos a la compra</div>
+                    </div>
+                    <div class="row form-row">
+                        <div class="col">
+                            <select id="compraProducto" class="input">
+                                <option value="">Selecciona Producto</option>
+                            </select>
+                        </div>
+                        <div class="col">
+                            <select id="compraTalla" class="input">
+                                <option value="">Selecciona Talla</option>
+                            </select>
+                        </div>
+                        <div class="col">
+                            <input type="number" id="compraCantidad" placeholder="Cantidad" class="input" min="1">
+                        </div>
+                        <div class="col">
+                            <input type="number" id="compraCosto" placeholder="Costo Unitario" class="input" step="0.01" min="0">
+                        </div>
+                        <div class="col" style="flex:0 0 auto;">
+                            <button type="button" id="btnAgregarItemCompra" class="btn secondary">Agregar</button>
+                        </div>
+                    </div>
+                    <div class="row form-row">
+                        <div class="col" style="text-align:right;">
+                            <h4>Total: $<span id="compraTotal">0.00</span></h4>
+                            <button type="submit" id="btnRegistrarCompra" class="btn primary">Registrar Compra</button>
+                        </div>
+                    </div>
+                </form>
+                <div class="row header-row">
+                    <h4>Historial de Compras</h4>
+                </div>
+                <div class="list-search">
+                    <input id="buscarCompraHistorial" placeholder="Buscar compras..." class="input" type="text">
+                </div>
+                <div id="listaCompras" class="list">
+                    <div class="item">Cargando compras...</div>
+                </div>
+            </div>
+
+            <!-- PANEL DE VENTAS -->
+            <div id="ventasPanel" class="panel tabContent" style="display:none;">
+                <h3>Registro y Consulta de Ventas</h3>
+                <div class="list-search">
+                    <input id="buscarVentaAdmin" placeholder="Buscar ventas por cliente, fecha..." class="input" type="text">
+                </div>
+                <div id="listaVentasAdmin" class="list">
+                    <div class="item">Cargando ventas...</div>
+                </div>
+            </div>
+
+            <!-- PANEL DE CLIENTES -->
+            <div id="clientesPanel" class="panel tabContent" style="display:none;">
+                <h3>Gestión de Clientes</h3>
+                <div class="row header-row">
+                    <h4>Registrar Nuevo Cliente</h4>
+                </div>
+                <form id="form-cliente">
+                    <div class="row form-row">
+                        <div class="col">
+                            <label>Nombre Completo</label>
+                            <input type="text" id="clienteNombre" class="input" required>
+                        </div>
+                        <div class="col">
+                            <label>Cédula</label>
+                            <input type="text" id="clienteCedula" class="input">
+                        </div>
+                        <div class="col">
+                            <label>Teléfono</label>
+                            <input type="tel" id="clienteTelefono" class="input">
+                        </div>
+                        <div class="col">
+                            <label>Email</label>
+                            <input type="email" id="clienteEmail" class="input">
+                        </div>
+                    </div>
+                    <div class="row form-row">
+                        <button type="submit" class="btn primary">Registrar Cliente</button>
+                    </div>
+                </form>
+                <div class="row header-row">
+                    <h4>Listado de Clientes</h4>
+                </div>
+                <div class="list-search">
+                    <input id="buscarClienteAdmin" placeholder="Buscar clientes..." class="input" type="text">
+                </div>
+                <div id="listaClientesAdmin" class="list">
+                    <div class="item">Cargando clientes...</div>
+                </div>
+            </div>
+
+            <!-- PANEL DE PROMOCIONES -->
+            <div id="promocionesPanel" class="panel tabContent" style="display:none;">
+                <h3>Gestión de Promociones</h3>
+                <div class="row header-row">
+                    <h4>Crear Nueva Promoción</h4>
+                </div>
+                <form id="form-promocion">
+                    <div class="row form-row">
+                        <div class="col">
+                            <label>Nombre de la Promoción</label>
+                            <input type="text" id="promoNombre" class="input" required>
+                        </div>
+                        <div class="col">
+                            <label>Tipo de Promoción</label>
+                            <select id="promoTipo" class="input" required>
+                                <option value="DESCUENTO_PORCENTAJE">Descuento Porcentaje</option>
+                                <option value="DESCUENTO_FIJO">Descuento Fijo</option>
+                                <option value="COMPRA_X_LLEVA_Y">Compra X Lleva Y</option>
+                            </select>
+                        </div>
+                        <div class="col">
+                            <label>Valor (%) o Monto ($)</label>
+                            <input type="number" id="promoValor" class="input" step="0.01" required>
+                        </div>
+                    </div>
+                    <div class="row form-row">
+                        <div class="col">
+                            <label>Fecha Inicio</label>
+                            <input type="date" id="promoFechaInicio" class="input" required>
+                        </div>
+                        <div class="col">
+                            <label>Fecha Fin</label>
+                            <input type="date" id="promoFechaFin" class="input" required>
+                        </div>
+                        <div class="col">
+                            <label>Aplicar a</label>
+                            <select id="promoAplicarA" class="input">
+                                <option value="">Todas las categorías</option>
+                            </select>
+                        </div>
+                        <div class="col">
+                            <label>Monto Mínimo de Compra</label>
+                            <input type="number" id="promoMinimoCompra" class="input" step="0.01" value="0">
+                        </div>
+                    </div>
+                    <div class="row form-row">
+                        <button type="submit" class="btn primary">Crear Promoción</button>
+                    </div>
+                </form>
+                <div class="row header-row">
+                    <h4>Promociones Activas</h4>
+                </div>
+                <div class="list-search">
+                    <input id="buscarPromocion" placeholder="Buscar promociones..." class="input" type="text">
+                </div>
+                <div id="listaPromociones" class="list">
+                    <div class="item">Cargando promociones...</div>
+                </div>
+            </div>
+
+            <!-- PANEL DE CONTABILIDAD -->
+            <div id="contabilidadPanel" class="panel tabContent" style="display:none;">
+                <h3>Registros Contables</h3>
+                <div class="chart-container">
+                    <div class="chart-header">
+                        <h4 class="chart-title">Ingresos por Ventas</h4>
+                        <select id="selectPeriodoIngresos" class="input" style="width:auto;">
+                            <option value="mes">Mes Actual</option>
+                            <option value="trimestre">Trimestre</option>
+                            <option value="anual">Año Actual</option>
+                        </select>
+                    </div>
+                    <div id="tablaIngresos" style="overflow-x:auto;">
+                        <table style="width:100%;border-collapse:collapse;">
+                            <thead>
+                                <tr style="background:var(--surface-alt);">
+                                    <th style="padding:var(--spacing-md);text-align:left;">Fecha</th>
+                                    <th style="padding:var(--spacing-md);text-align:right;">Monto</th>
+                                    <th style="padding:var(--spacing-md);text-align:left;">Tipo de Pago</th>
+                                </tr>
+                            </thead>
+                            <tbody id="tbodyIngresos">
+                                <tr><td colspan="3" style="padding:var(--spacing-md);text-align:center;">Cargando datos...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- PANEL DE CUENTAS POR PAGAR -->
+            <div id="cuentas_pagarPanel" class="panel tabContent" style="display:none;">
+                <h3>Gestión de Cuentas por Pagar</h3>
+                <div class="list-search">
+                    <input id="buscarCuentaPagar" placeholder="Buscar cuentas por pagar..." class="input" type="text">
+                </div>
+                <div id="listaCuentasPagar" class="list">
+                    <div class="item">Cargando cuentas por pagar...</div>
+                </div>
+            </div>
+
+            <!-- PANEL DE CONTROL DE CAJA -->
+            <div id="cajaPanel" class="panel tabContent" style="display:none;">
+                <h3>Control de Movimientos de Caja</h3>
+                <div class="list-search">
+                    <input id="buscarMovimientoCaja" placeholder="Buscar movimientos..." class="input" type="text">
+                </div>
+                <div id="listaMovimientosCaja" class="list">
+                    <div class="item">Cargando movimientos...</div>
+                </div>
+            </div>
+
+            <!-- PANEL DE CONCILIACIÓN BANCARIA -->
+            <div id="conciliacionPanel" class="panel tabContent" style="display:none;">
+                <h3>Conciliación Bancaria</h3>
+                <div class="row header-row">
+                    <h4>Nueva Conciliación</h4>
+                </div>
+                <form id="form-conciliacion">
+                    <div class="row form-row">
+                        <div class="col">
+                            <label>Fecha de Conciliación</label>
+                            <input type="date" id="conciliacionFecha" class="input" required>
+                        </div>
+                        <div class="col">
+                            <label>Saldo según Libros</label>
+                            <input type="number" id="conciliacionSaldoLibro" class="input" step="0.01" required>
+                        </div>
+                        <div class="col">
+                            <label>Saldo según Banco</label>
+                            <input type="number" id="conciliacionSaldoBanco" class="input" step="0.01" required>
+                        </div>
+                    </div>
+                    <div class="row form-row">
+                        <button type="submit" class="btn primary">Registrar Conciliación</button>
+                    </div>
+                </form>
+                <div class="row header-row">
+                    <h4>Historial de Conciliaciones</h4>
+                </div>
+                <div id="listaConciliaciones" class="list">
+                    <div class="item">Cargando conciliaciones...</div>
+                </div>
+            </div>
+
+            <!-- PANEL DE REPORTES -->
+            <div id="reportesPanel" class="panel tabContent" style="display:none;">
+                <h3>Reportes Gerenciales</h3>
+                <div class="chart-container">
+                    <div class="chart-header">
+                        <h4 class="chart-title">Reporte de Utilidad por Producto</h4>
+                        <button onclick="exportarReporteUtilidad()" class="btn secondary">Exportar</button>
+                    </div>
+                    <div id="tablaReporteUtilidad" style="overflow-x:auto;">
+                        <table style="width:100%;border-collapse:collapse;">
+                            <thead>
+                                <tr style="background:var(--surface-alt);">
+                                    <th style="padding:var(--spacing-md);text-align:left;">Producto</th>
+                                    <th style="padding:var(--spacing-md);text-align:right;">Costo</th>
+                                    <th style="padding:var(--spacing-md);text-align:right;">Precio Venta</th>
+                                    <th style="padding:var(--spacing-md);text-align:right;">Utilidad Unitaria</th>
+                                    <th style="padding:var(--spacing-md);text-align:right;">Unidades Vendidas</th>
+                                    <th style="padding:var(--spacing-md);text-align:right;">Utilidad Total</th>
+                                    <th style="padding:var(--spacing-md);text-align:right;">Margen %</th>
+                                </tr>
+                            </thead>
+                            <tbody id="tbodyReporteUtilidad">
+                                <tr><td colspan="7" style="padding:var(--spacing-md);text-align:center;">Cargando datos...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+                </div>
+            </div>
+        </div>
     </div>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js"></script>
     <script src="cliente.js"></script>
+    <script src="admin-funcionalidades.js"></script>
 </body>
 </html>

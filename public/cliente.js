@@ -19,35 +19,64 @@ document.addEventListener('DOMContentLoaded', () => {
     // --- ADMINISTRADOR: Gestión de Tallas ---
     const formTalla = document.getElementById('form-talla');
     const catalogoTallas = document.getElementById('catalogoTallas');
+    let todasLasTallas = [];
+    
     window.cargarTallas = async function cargarTallas() {
         try {
             const res = await fetch('/api/tallas');
             const data = await res.json();
+            todasLasTallas = data.tallas || [];
             if (catalogoTallas) {
-                catalogoTallas.innerHTML = '';
-                if (data.tallas.length === 0) {
-                    catalogoTallas.innerHTML = '<div class="item">No hay tallas registradas.</div>';
-                } else {
-                    data.tallas.forEach(talla => {
-                        const div = document.createElement('div');
-                        div.className = 'item';
-                        div.dataset.id = talla.id_talla;
-                        div.dataset.ajuste = talla.ajuste || '';
-                        div.dataset.pecho = talla.pecho || '';
-                        div.dataset.cintura = talla.cintura || '';
-                        div.dataset.cadera = talla.cadera || '';
-                        div.dataset.largo = talla.largo || '';
-                        div.innerHTML = `
-                            <span><b>${talla.nombre}</b> | Ajuste: ${talla.ajuste || '-'} | Pecho: ${talla.pecho || '-'} | Cintura: ${talla.cintura || '-'} | Cadera: ${talla.cadera || '-'} | Largo: ${talla.largo || '-'}</span>
-                            <div class="actions">
-                                <button class='btn btn-small' onclick='editarTalla(${talla.id_talla}, ${JSON.stringify(talla)})'>Editar</button>
-                                <button class='btn btn-small secondary' onclick='mostrarConfirmacion(${talla.id_talla}, "tallas", "${talla.nombre}")'>Eliminar</button>
-                            </div>`;
-                        catalogoTallas.appendChild(div);
-                    });
-                }
+                renderTallas(todasLasTallas);
             }
-        } catch { catalogoTallas.innerHTML = '<div class="item">Error al cargar tallas.</div>'; }
+        } catch { 
+            if (catalogoTallas) {
+                catalogoTallas.innerHTML = '<div class="item">Error al cargar tallas.</div>';
+            }
+        }
+    }
+    
+    function renderTallas(tallas) {
+        if (!catalogoTallas) return;
+        catalogoTallas.innerHTML = '';
+        if (tallas.length === 0) {
+            catalogoTallas.innerHTML = '<div class="item">No hay tallas registradas.</div>';
+            return;
+        }
+        tallas.forEach(talla => {
+            const div = document.createElement('div');
+            div.className = 'item';
+            div.dataset.id = talla.id_talla;
+            div.dataset.ajuste = talla.ajuste || '';
+            div.dataset.pecho = talla.pecho || '';
+            div.dataset.cintura = talla.cintura || '';
+            div.dataset.cadera = talla.cadera || '';
+            div.dataset.largo = talla.largo || '';
+            div.innerHTML = `
+                <span><b>${talla.nombre}</b> | Ajuste: ${talla.ajuste || '-'} | Pecho: ${talla.pecho || '-'} | Cintura: ${talla.cintura || '-'} | Cadera: ${talla.cadera || '-'} | Largo: ${talla.largo || '-'}</span>
+                <div class="actions">
+                    <button class='btn btn-small' onclick='editarTalla(${talla.id_talla}, ${JSON.stringify(talla)})'>Editar</button>
+                    <button class='btn btn-small secondary' onclick='mostrarConfirmacion(${talla.id_talla}, "tallas", "${talla.nombre}")'>Eliminar</button>
+                </div>`;
+            catalogoTallas.appendChild(div);
+        });
+    }
+    
+    // Búsqueda de tallas
+    const buscarTalla = document.getElementById('buscarTalla');
+    if (buscarTalla) {
+        buscarTalla.addEventListener('input', function() {
+            const busqueda = this.value.toLowerCase().trim();
+            if (busqueda === '') {
+                renderTallas(todasLasTallas);
+            } else {
+                const filtradas = todasLasTallas.filter(talla => 
+                    (talla.nombre && talla.nombre.toLowerCase().includes(busqueda)) ||
+                    (talla.ajuste && talla.ajuste.toLowerCase().includes(busqueda))
+                );
+                renderTallas(filtradas);
+            }
+        });
     }
     if (formTalla) {
         formTalla.addEventListener('submit', async (e) => {
@@ -180,44 +209,69 @@ document.addEventListener('DOMContentLoaded', () => {
     };
     // --- ADMINISTRADOR: Listado, edición y eliminación de productos ---
     const adminProductos = document.getElementById('adminProductos');
+    let todosLosProductos = []; // Almacenar todos los productos para búsqueda
+    
     async function cargarProductos() {
         try {
             const res = await fetch('/api/admin/productos');
             const data = await res.json();
             if (adminProductos) {
-                adminProductos.innerHTML = '';
-                if (data.productos.length === 0) {
-                    adminProductos.innerHTML = '<div class="item">No hay productos registrados.</div>';
-                } else {
-                    // Crear tabla bonita
-                    let tabla = `<table class='tabla-productos' style='width:100%;border-collapse:collapse;'>
-                        <thead>
-                            <tr style='background:#e0e7ef;'>
-                                <th>Marca</th>
-                                <th>Nombre</th>
-                                <th>Cantidad</th>
-                                <th>Precio ($)</th>
-                                <th>Acciones</th>
-                            </tr>
-                        </thead>
-                        <tbody>`;
-                    data.productos.forEach(prod => {
-                        tabla += `<tr style='border-bottom:1px solid #ccc;'>
-                            <td>${prod.marca || ''}</td>
-                            <td>${prod.nombre}</td>
-                            <td>${prod.tallas || ''}</td>
-                            <td>${prod.precio_venta}</td>
-                            <td>
-                                <button class='btn' style='background:#3b82f6;color:#fff;margin-right:5px;' onclick='editarProducto(${prod.id_producto})'>Editar</button>
-                                <button class='btn danger' style='background:#ef4444;color:#fff;' onclick='eliminarProducto(${prod.id_producto})'>Eliminar</button>
-                            </td>
-                        </tr>`;
-                    });
-                    tabla += '</tbody></table>';
-                    adminProductos.innerHTML = tabla;
-                }
+                todosLosProductos = data.productos || [];
+                renderProductos(todosLosProductos);
             }
-        } catch { adminProductos.innerHTML = '<div class="item">Error al cargar productos.</div>'; }
+        } catch { 
+            if (adminProductos) {
+                adminProductos.innerHTML = '<div class="item">Error al cargar productos.</div>';
+            }
+        }
+    }
+    
+    function renderProductos(productos) {
+        if (!adminProductos) return;
+        adminProductos.innerHTML = '';
+        if (productos.length === 0) {
+            adminProductos.innerHTML = '<div class="item">No hay productos registrados.</div>';
+            return;
+        }
+        productos.forEach(prod => {
+            const div = document.createElement('div');
+            div.className = 'item';
+            div.dataset.id = prod.id_producto;
+            div.innerHTML = `
+                <div class="producto-info">
+                    <strong>${prod.marca || ''} - ${prod.nombre}</strong><br>
+                    Categoría: ${prod.categoria || 'N/A'}<br>
+                    Precio: $${prod.precio_venta || '0.00'} | Stock: ${prod.inventario || 0}
+                </div>
+                <div class="actions">
+                    <button class="btn btn-small" onclick="editarProducto(${prod.id_producto})">Editar</button>
+                    <button class="btn btn-small secondary" onclick="eliminarProducto(${prod.id_producto})">Eliminar</button>
+                </div>`;
+            adminProductos.appendChild(div);
+        });
+    }
+    
+    // Función de búsqueda de productos (búsqueda local)
+    const prodBuscar = document.getElementById('prodBuscar');
+    if (prodBuscar) {
+        prodBuscar.addEventListener('input', function() {
+            const busqueda = this.value.toLowerCase().trim();
+            if (busqueda === '') {
+                renderProductos(todosLosProductos);
+            } else {
+                const filtrados = todosLosProductos.filter(prod => 
+                    (prod.nombre && prod.nombre.toLowerCase().includes(busqueda)) ||
+                    (prod.marca && prod.marca.toLowerCase().includes(busqueda)) ||
+                    (prod.categoria && prod.categoria.toLowerCase().includes(busqueda))
+                );
+                renderProductos(filtrados);
+            }
+        });
+    }
+    
+    // Cargar productos al iniciar si estamos en admin.html
+    if (window.location.pathname.includes('admin.html')) {
+        cargarProductos();
     }
     // (Ya está definida la versión funcional de window.editarProducto más arriba)
     window.eliminarProducto = async function(id) {
@@ -236,36 +290,63 @@ document.addEventListener('DOMContentLoaded', () => {
     const formCategoria = document.getElementById('form-categoria');
     const catalogoCategorias = document.getElementById('catalogoCategorias');
     const prodCategoria = document.getElementById('prodCategoria');
+    let todasLasCategorias = [];
+    
     window.cargarCategorias = async function cargarCategorias() {
         try {
             const res = await fetch('/api/categorias');
             const data = await res.json();
+            todasLasCategorias = data.categorias || [];
             if (catalogoCategorias) {
-                catalogoCategorias.innerHTML = '';
-                data.categorias.forEach(cat => {
-                    const div = document.createElement('div');
-                    div.className = 'item';
-                    div.dataset.id = cat.id_categoria;
-                    div.innerHTML = `
-                        <span>${cat.nombre}</span>
-                        <div class="actions">
-                            <button class='btn btn-small' onclick='editarCategoria(${cat.id_categoria}, "${cat.nombre}")'>Editar</button>
-                            <button class='btn btn-small secondary' onclick='mostrarConfirmacion(${cat.id_categoria}, "categorias", "${cat.nombre}")'>Eliminar</button>
-                        </div>`;
-                    catalogoCategorias.appendChild(div);
-                });
+                renderCategorias(todasLasCategorias);
             }
             if (prodCategoria) {
                 prodCategoria.innerHTML = '<option value="">Selecciona Categoría</option>';
-                data.categorias.forEach(cat => {
+                todasLasCategorias.forEach(cat => {
                     const opt = document.createElement('option');
                     opt.value = cat.id_categoria;
-                    // CORRECCIÓN: Usar cat.nombre consistentemente
                     opt.textContent = cat.nombre; 
                     prodCategoria.appendChild(opt);
                 });
             }
         } catch {}
+    }
+    
+    function renderCategorias(categorias) {
+        if (!catalogoCategorias) return;
+        catalogoCategorias.innerHTML = '';
+        if (categorias.length === 0) {
+            catalogoCategorias.innerHTML = '<div class="item">No hay categorías registradas.</div>';
+            return;
+        }
+        categorias.forEach(cat => {
+            const div = document.createElement('div');
+            div.className = 'item';
+            div.dataset.id = cat.id_categoria;
+            div.innerHTML = `
+                <span>${cat.nombre}</span>
+                <div class="actions">
+                    <button class='btn btn-small' onclick='editarCategoria(${cat.id_categoria}, "${cat.nombre}")'>Editar</button>
+                    <button class='btn btn-small secondary' onclick='mostrarConfirmacion(${cat.id_categoria}, "categorias", "${cat.nombre}")'>Eliminar</button>
+                </div>`;
+            catalogoCategorias.appendChild(div);
+        });
+    }
+    
+    // Búsqueda de categorías
+    const buscarCategoria = document.getElementById('buscarCategoria');
+    if (buscarCategoria) {
+        buscarCategoria.addEventListener('input', function() {
+            const busqueda = this.value.toLowerCase().trim();
+            if (busqueda === '') {
+                renderCategorias(todasLasCategorias);
+            } else {
+                const filtradas = todasLasCategorias.filter(cat => 
+                    cat.nombre && cat.nombre.toLowerCase().includes(busqueda)
+                );
+                renderCategorias(filtradas);
+            }
+        });
     }
     if (formCategoria) {
         formCategoria.addEventListener('submit', async (e) => {
@@ -294,30 +375,19 @@ document.addEventListener('DOMContentLoaded', () => {
     const formProveedor = document.getElementById('form-proveedor');
     const catalogoProveedores = document.getElementById('catalogoProveedores');
     const prodProveedor = document.getElementById('prodProveedor');
+    let todosLosProveedores = [];
+    
     window.cargarProveedores = async function cargarProveedores() {
         try {
             const res = await fetch('/api/proveedores');
             const data = await res.json();
+            todosLosProveedores = data.proveedores || [];
             if (catalogoProveedores) {
-                catalogoProveedores.innerHTML = '';
-                data.proveedores.forEach(prov => {
-                    const div = document.createElement('div');
-                    div.className = 'item';
-                    div.dataset.id = prov.id_proveedor;
-                    div.dataset.contacto = prov.contacto || '';
-                    div.dataset.telefono = prov.telefono || '';
-                    div.innerHTML = `
-                        <span><b>${prov.nombre}</b>${prov.contacto ? ` | Contacto: ${prov.contacto}` : ''}${prov.telefono ? ` | Tel: ${prov.telefono}` : ''}</span>
-                        <div class="actions">
-                            <button class='btn btn-small' onclick='editarProveedor(${prov.id_proveedor}, ${JSON.stringify({nombre: prov.nombre, contacto: prov.contacto, telefono: prov.telefono})})'>Editar</button>
-                            <button class='btn btn-small secondary' onclick='mostrarConfirmacion(${prov.id_proveedor}, "proveedores", "${prov.nombre}")'>Eliminar</button>
-                        </div>`;
-                    catalogoProveedores.appendChild(div);
-                });
+                renderProveedores(todosLosProveedores);
             }
             if (prodProveedor) {
                 prodProveedor.innerHTML = '<option value="">Selecciona Proveedor</option>';
-                data.proveedores.forEach(prov => {
+                todosLosProveedores.forEach(prov => {
                     const opt = document.createElement('option');
                     opt.value = prov.id_proveedor;
                     opt.textContent = prov.nombre;
@@ -325,6 +395,47 @@ document.addEventListener('DOMContentLoaded', () => {
                 });
             }
         } catch {}
+    }
+    
+    function renderProveedores(proveedores) {
+        if (!catalogoProveedores) return;
+        catalogoProveedores.innerHTML = '';
+        if (proveedores.length === 0) {
+            catalogoProveedores.innerHTML = '<div class="item">No hay proveedores registrados.</div>';
+            return;
+        }
+        proveedores.forEach(prov => {
+            const div = document.createElement('div');
+            div.className = 'item';
+            div.dataset.id = prov.id_proveedor;
+            div.dataset.contacto = prov.contacto || '';
+            div.dataset.telefono = prov.telefono || '';
+            div.innerHTML = `
+                <span><b>${prov.nombre}</b>${prov.contacto ? ` | Contacto: ${prov.contacto}` : ''}${prov.telefono ? ` | Tel: ${prov.telefono}` : ''}</span>
+                <div class="actions">
+                    <button class='btn btn-small' onclick='editarProveedor(${prov.id_proveedor}, ${JSON.stringify({nombre: prov.nombre, contacto: prov.contacto, telefono: prov.telefono})})'>Editar</button>
+                    <button class='btn btn-small secondary' onclick='mostrarConfirmacion(${prov.id_proveedor}, "proveedores", "${prov.nombre}")'>Eliminar</button>
+                </div>`;
+            catalogoProveedores.appendChild(div);
+        });
+    }
+    
+    // Búsqueda de proveedores
+    const buscarProveedor = document.getElementById('buscarProveedor');
+    if (buscarProveedor) {
+        buscarProveedor.addEventListener('input', function() {
+            const busqueda = this.value.toLowerCase().trim();
+            if (busqueda === '') {
+                renderProveedores(todosLosProveedores);
+            } else {
+                const filtrados = todosLosProveedores.filter(prov => 
+                    (prov.nombre && prov.nombre.toLowerCase().includes(busqueda)) ||
+                    (prov.contacto && prov.contacto.toLowerCase().includes(busqueda)) ||
+                    (prov.telefono && prov.telefono.includes(busqueda))
+                );
+                renderProveedores(filtrados);
+            }
+        });
     }
     if (formProveedor) {
         formProveedor.addEventListener('submit', async (e) => {
