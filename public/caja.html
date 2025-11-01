@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+	<title>ERP simple - Caja</title>
+	<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800&display=swap" rel="stylesheet">
+	<link rel="stylesheet" href="caja.min.css">
+</head>
+<body>
+	<div id="app" class="container">
+		<header class="header">
+			<h1>ERP simple - Módulo de Caja</h1>
+      <div id="statusDisplay" class="status-msg">Conectado</div>
+      
+      <div id="userPanel" class="user-panel">
+        <!-- Estos valores se llenarán con JS al cargar la página -->
+        <span id="userName" class="badge"></span>
+        <span id="rolLabel" class="badge role-badge">CAJA</span>
+        <button id="logoutBtn" class="btn">Cerrar sesión</button>
+      </div>
+    </header>
+
+		<main id="panelSection" class="card">
+			<!-- DEMO: vista rápida de caja -->
+			<div class="card" style="margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
+				<div>
+					<strong>TPV Demo</strong>
+					<div class="muted" style="font-size:0.95rem">Botones grandes y layout optimizado para táctil.</div>
+				</div>
+				<div class="center">
+					<button class="btn big" style="background:#0b74ff;color:#fff">Cobrar</button>
+				</div>
+			</div>
+      <h2>Registro de Ventas Rápidas</h2>
+      
+      <div id="cajaPanel" class="panel tabContent">
+        <div class="row header-row">
+          <h4>Nueva Transacción</h4>
+        </div>
+        <div class="row form-row">
+          <form id="form-venta-caja" style="width:100%;">
+            <div class="row form-row">
+              <div class="col">
+                <input id="ventaClienteCedula" placeholder="Cédula" class="input" required style="width:120px;">
+                <input id="ventaClienteNombre" placeholder="Nombre del Cliente" class="input" required style="width:180px; margin-left:8px;">
+                <input id="ventaClienteTelefono" placeholder="Teléfono" class="input" style="width:120px; margin-left:8px;">
+                <input id="ventaClienteEmail" placeholder="Email" class="input" style="width:160px; margin-left:8px;">
+            </div>
+            <div class="row form-row">
+              <div class="col">
+                <select id="ventaProducto" class="input" required>
+                  <option value="">Selecciona producto</option>
+                </select>
+              </div>
+              <div class="col">
+                <select id="ventaTalla" class="input" required>
+                  <option value="">Selecciona talla</option>
+                </select>
+              </div>
+              <div class="col">
+                <input id="ventaCantidad" placeholder="Cantidad" type="number" min="1" class="input" required>
+              </div>
+            </div>
+            <div class="row form-row">
+              <div class="col">
+                <input id="ventaPrecioUnitario" placeholder="Precio unitario ($)" type="number" step="0.01" class="input" required>
+              </div>
+              <div class="col">
+                <input id="ventaTotalDolar" placeholder="Total ($)" type="text" class="input" readonly>
+              </div>
+              <div class="col">
+                <input id="ventaTotalBs" placeholder="Total (Bs)" type="text" class="input" readonly>
+              </div>
+              <div class="col">
+                <button id="btnAgregarProducto" class="btn secondary" type="button">Agregar al carrito</button>
+              </div>
+            </div>
+            <div class="row form-row">
+              <div class="col">
+                <select id="ventaTipoPago" class="input" required>
+                  <option value="Pago Móvil">Pago Móvil</option>
+                  <option value="Efectivo Bolívares">Efectivo Bolívares</option>
+                  <option value="Transferencia">Transferencia</option>
+                  <option value="Dólares en efectivo">Dólares en efectivo</option>
+                  <option value="Punto de venta">Punto de venta</option>
+                </select>
+              </div>
+              <div class="col">
+                <button id="btnPagarVenta" class="btn primary" type="button">Pagar venta</button>
+              </div>
+            </div>
+          </form>
+        <div id="ventaDetalle" class="list">
+           <div class="item">Carrito vacío. Agrega productos para la venta.</div>
+        </div>
+      </div>
+    </main>
+  </div>
+  <script src="cliente.js"></script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+{
+  "name": "modasoft-erp",
+  "version": "1.0.0",
+  "description": "ERP simple con Express y MySQL",
+  "main": "servidor.js",
+  "scripts": {
+    "start": "node servidor/servidor.js"
+  },
+  "dependencies": {
+    "bcrypt": "^5.1.1",
+    "bcryptjs": "^3.0.2",
+    "cookie-session": "^2.0.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "mysql2": "^3.9.7"
+  }
+}

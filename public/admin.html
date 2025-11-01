@@ -1,0 +1,721 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>ERP simple - Administración</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="admin.min.css">
+    <script>
+    function switchTab(tab) {
+        document.getElementById('inventarioPanel').style.display = 'none';
+        document.getElementById('catalogoPanel').style.display = 'none';
+        document.getElementById('transaccionesPanel').style.display = 'none';
+        document.getElementById('tab-inventario').classList.remove('active');
+        document.getElementById('tab-catalogo').classList.remove('active');
+        document.getElementById('tab-transacciones').classList.remove('active');
+        if (tab === 'inventario') {
+            document.getElementById('inventarioPanel').style.display = 'block';
+            document.getElementById('tab-inventario').classList.add('active');
+        }
+        if (tab === 'catalogo') {
+            document.getElementById('catalogoPanel').style.display = 'block';
+            document.getElementById('tab-catalogo').classList.add('active');
+        }
+        if (tab === 'transacciones') {
+            document.getElementById('transaccionesPanel').style.display = 'block';
+            document.getElementById('tab-transacciones').classList.add('active');
+        }
+    }
+    function switchCatalogTab(tab) {
+        // Oculta todas las secciones del submenú de Catálogos
+        var sections = document.querySelectorAll('.catalog-section');
+        sections.forEach(function(s){ s.style.display = 'none'; });
+        // Remueve active de botones
+        var tabs = document.querySelectorAll('.catalog-subnav button');
+        tabs.forEach(function(b){ b.classList.remove('active'); });
+        // Muestra la solicitada
+        if (tab === 'categorias') {
+            document.getElementById('catalog-categorias').style.display = 'block';
+            document.getElementById('cat-tab-categorias').classList.add('active');
+        }
+        if (tab === 'tallas') {
+            document.getElementById('catalog-tallas').style.display = 'block';
+            document.getElementById('cat-tab-tallas').classList.add('active');
+        }
+        if (tab === 'proveedores') {
+            document.getElementById('catalog-proveedores').style.display = 'block';
+            document.getElementById('cat-tab-proveedores').classList.add('active');
+        }
+    }
+    // Funciones para manejar modales
+    function mostrarModal(id) {
+        document.getElementById(id).style.display = 'flex';
+    }
+    
+    function cerrarModal(id) {
+        document.getElementById(id).style.display = 'none';
+    }
+
+    // Funciones para manejar eliminación
+    async function confirmarEliminacion() {
+        try {
+            const id = document.getElementById('eliminarId').value;
+            const tipo = document.getElementById('eliminarTipo').value;
+            
+            // Primero verificar si el elemento está siendo utilizado
+            const validacionRes = await fetch('/api/' + tipo + '/validar-eliminacion/' + id);
+            if (!validacionRes.ok) {
+                throw new Error('Error al validar la eliminación');
+            }
+            const validacionData = await validacionRes.json();
+            
+            if (!validacionData.puedeEliminar) {
+                throw new Error(validacionData.message || 'No se puede eliminar porque está siendo utilizado por uno o más productos.');
+            }
+            
+            // Si no está siendo utilizado, proceder con la eliminación
+            const deleteRes = await fetch('/api/' + tipo + '/' + id, {
+                method: 'DELETE',
+                headers: {
+                    'Content-Type': 'application/json'
+                }
+            });
+            
+            if (!deleteRes.ok) {
+                throw new Error('Error al eliminar el elemento');
+            }
+            
+            const deleteData = await deleteRes.json();
+            if (!deleteData.success) {
+                throw new Error(deleteData.message || 'Error al eliminar el elemento');
+            }
+            
+            // Si todo salió bien
+            if (tipo === 'categorias') {
+                cargarCategorias();
+            } else if (tipo === 'tallas') {
+                cargarTallas();
+            } else if (tipo === 'proveedores') {
+                cargarProveedores();
+            }
+            cerrarModal('modalConfirmarEliminar');
+        } catch (error) {
+            console.error('Error:', error);
+            alert(error.message || 'Error al procesar la solicitud');
+            cerrarModal('modalConfirmarEliminar');
+        }
+    }
+
+    function mostrarConfirmacion(id, tipo, nombre) {
+        document.getElementById('eliminarId').value = id;
+        document.getElementById('eliminarTipo').value = tipo;
+        document.getElementById('mensajeConfirmacion').textContent = 
+            '¿Está seguro de que desea eliminar ' + (tipo === 'categorias' ? 'la categoría' : 
+            tipo === 'tallas' ? 'la talla' : 'el proveedor') + ' "' + nombre + '"?';
+        mostrarModal('modalConfirmarEliminar');
+    }
+
+    function cerrarModalConfirmar() {
+        cerrarModal('modalConfirmarEliminar');
+    }
+
+    // Funciones para editar elementos
+    function editarCategoria(id, nombre) {
+        document.getElementById('editCatId').value = id;
+        document.getElementById('editCatNombre').value = nombre;
+        mostrarModal('modalEditarCategoria');
+    }
+
+    function editarTalla(id, data) {
+        document.getElementById('editTallaId').value = id;
+        document.getElementById('editTallaNombre').value = data.nombre;
+        document.getElementById('editTallaAjuste').value = data.ajuste;
+        document.getElementById('editTallaPecho').value = data.pecho;
+        document.getElementById('editTallaCintura').value = data.cintura;
+        document.getElementById('editTallaCadera').value = data.cadera;
+        document.getElementById('editTallaLargo').value = data.largo;
+        mostrarModal('modalEditarTalla');
+    }
+
+    function editarProveedor(id, data) {
+        document.getElementById('editProvId').value = id;
+        document.getElementById('editProvNombre').value = data.nombre;
+        document.getElementById('editProvContacto').value = data.contacto;
+        document.getElementById('editProvTelefono').value = data.telefono;
+        mostrarModal('modalEditarProveedor');
+    }
+
+    // Manejadores de formularios de edición
+    window.addEventListener('load', function() {
+        // Formulario de Editar Categoría
+        const formEditarCategoria = document.getElementById('formEditarCategoria');
+        if (formEditarCategoria) {
+            formEditarCategoria.onsubmit = async function(e) {
+                e.preventDefault();
+                try {
+                    const id = document.getElementById('editCatId').value;
+                    const nombre = document.getElementById('editCatNombre').value.trim();
+                    
+                    if (!nombre) {
+                        alert('El nombre es requerido');
+                        return;
+                    }
+
+                    const response = await fetch('/api/categorias/' + id, {
+                        method: 'PUT',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({ nombre })
+                    });
+
+                    const data = await response.json();
+                    if (data.success) {
+                        cerrarModal('modalEditarCategoria');
+                        cargarCategorias();
+                    } else {
+                        throw new Error(data.message || 'Error al actualizar categoría');
+                    }
+                } catch (error) {
+                    console.error('Error:', error);
+                    alert(error.message || 'Error al procesar la solicitud');
+                }
+            };
+        }
+
+        // Formulario de Editar Talla
+        const formEditarTalla = document.getElementById('formEditarTalla');
+        if (formEditarTalla) {
+            formEditarTalla.onsubmit = async function(e) {
+                e.preventDefault();
+                try {
+                    const id = document.getElementById('editTallaId').value;
+                    const data = {
+                        nombre: document.getElementById('editTallaNombre').value.trim(),
+                        ajuste: document.getElementById('editTallaAjuste').value,
+                        pecho: document.getElementById('editTallaPecho').value || null,
+                        cintura: document.getElementById('editTallaCintura').value || null,
+                        cadera: document.getElementById('editTallaCadera').value || null,
+                        largo: document.getElementById('editTallaLargo').value || null
+                    };
+
+                    if (!data.nombre || !data.ajuste) {
+                        alert('El nombre y el ajuste son requeridos');
+                        return;
+                    }
+
+                    const response = await fetch('/api/tallas/' + id, {
+                        method: 'PUT',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify(data)
+                    });
+
+                    const responseData = await response.json();
+                    if (responseData.success) {
+                        cerrarModal('modalEditarTalla');
+                        cargarTallas();
+                    } else {
+                        throw new Error(responseData.message || 'Error al actualizar talla');
+                    }
+                } catch (error) {
+                    console.error('Error:', error);
+                    alert(error.message || 'Error al procesar la solicitud');
+                }
+            };
+        }
+
+        // Formulario de Editar Proveedor
+        const formEditarProveedor = document.getElementById('formEditarProveedor');
+        if (formEditarProveedor) {
+            formEditarProveedor.onsubmit = async function(e) {
+                e.preventDefault();
+                try {
+                    const id = document.getElementById('editProvId').value;
+                    const data = {
+                        nombre: document.getElementById('editProvNombre').value.trim(),
+                        contacto: document.getElementById('editProvContacto').value.trim(),
+                        telefono: document.getElementById('editProvTelefono').value.trim()
+                    };
+
+                    if (!data.nombre) {
+                        alert('El nombre es requerido');
+                        return;
+                    }
+
+                    const response = await fetch('/api/proveedores/' + id, {
+                        method: 'PUT',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify(data)
+                    });
+
+                    const responseData = await response.json();
+                    if (responseData.success) {
+                        cerrarModal('modalEditarProveedor');
+                        cargarProveedores();
+                    } else {
+                        throw new Error(responseData.message || 'Error al actualizar proveedor');
+                    }
+                } catch (error) {
+                    console.error('Error:', error);
+                    alert(error.message || 'Error al procesar la solicitud');
+                }
+            };
+        }
+    });
+
+    // Función para recargar listas (debe implementarse en cliente.js o aquí)
+    function cargarLista(tipo) {
+        // Esta función debería estar implementada en cliente.js
+        // Aquí solo la declaramos para evitar errores
+        console.log('Recargando lista de: ' + tipo);
+    }
+
+    window.onload = function() {
+        switchTab('inventario');
+        // Inicializa el submenú de Catálogos
+        switchCatalogTab('categorias');
+        
+        // Cargar productos al iniciar
+        cargarProductos();
+        
+        // Inicializar listeners para botones de acción en las listas
+        ['Categorias', 'Tallas', 'Proveedores'].forEach(function(tipo) {
+            const lista = document.getElementById('catalogo' + tipo);
+            if (lista) {
+                lista.addEventListener('click', function(e) {
+                    const target = e.target;
+                    if (target.classList.contains('btn')) {
+                        const item = target.closest('.item');
+                        const id = item.dataset.id;
+                        const nombre = item.querySelector('span').textContent;
+                        
+                        if (target.textContent === 'Editar') {
+                            if (tipo === 'Categorias') {
+                                editarCategoria(id, nombre);
+                            } else if (tipo === 'Tallas') {
+                                editarTalla(id, {
+                                    nombre: nombre,
+                                    ajuste: item.dataset.ajuste,
+                                    pecho: item.dataset.pecho,
+                                    cintura: item.dataset.cintura,
+                                    cadera: item.dataset.cadera,
+                                    largo: item.dataset.largo
+                                });
+                            } else {
+                                editarProveedor(id, {
+                                    nombre: nombre,
+                                    contacto: item.dataset.contacto,
+                                    telefono: item.dataset.telefono
+                                });
+                            }
+                        } else if (target.textContent === 'Eliminar') {
+                            mostrarConfirmacion(id, tipo.toLowerCase(), nombre);
+                        }
+                    }
+                });
+            }
+        });
+    };
+
+    async function cargarProductos() {
+        try {
+            const response = await fetch('/api/productos');
+            const data = await response.json();
+            
+            const contenedor = document.getElementById('adminProductos');
+            if (data.length === 0) {
+                contenedor.innerHTML = '<div class="item">No hay productos registrados</div>';
+                return;
+            }
+
+            contenedor.innerHTML = data.map(producto => `
+                <div class="item" data-id="${producto.id}">
+                    <div class="producto-info">
+                        <strong>${producto.marca} - ${producto.nombre}</strong><br>
+                        Categoría: ${producto.categoria}<br>
+                        Precio: $${producto.precio} | Stock: ${producto.inventario}
+                    </div>
+                    <div class="actions">
+                        <button class="btn btn-small" onclick="editarProducto('${producto.id}')">Editar</button>
+                        <button class="btn btn-small secondary" onclick="mostrarConfirmacion('${producto.id}', 'productos', '${producto.nombre}')">Eliminar</button>
+                    </div>
+                </div>
+            `).join('');
+
+        } catch (error) {
+            console.error('Error al cargar productos:', error);
+            document.getElementById('adminProductos').innerHTML = 
+                '<div class="item">Error al cargar los productos</div>';
+        }
+    }
+
+    // Función para buscar productos
+    document.getElementById('btnBuscarProd').onclick = async function() {
+        const busqueda = document.getElementById('prodBuscar').value.trim();
+        try {
+            const response = await fetch(`/api/productos/buscar?q=${encodeURIComponent(busqueda)}`);
+            const data = await response.json();
+            
+            const contenedor = document.getElementById('adminProductos');
+            if (data.length === 0) {
+                contenedor.innerHTML = '<div class="item">No se encontraron productos</div>';
+                return;
+            }
+
+            contenedor.innerHTML = data.map(producto => `
+                <div class="item" data-id="${producto.id}">
+                    <div class="producto-info">
+                        <strong>${producto.marca} - ${producto.nombre}</strong><br>
+                        Categoría: ${producto.categoria}<br>
+                        Precio: $${producto.precio} | Stock: ${producto.inventario}
+                    </div>
+                    <div class="actions">
+                        <button class="btn btn-small" onclick="editarProducto('${producto.id}')">Editar</button>
+                        <button class="btn btn-small secondary" onclick="mostrarConfirmacion('${producto.id}', 'productos', '${producto.nombre}')">Eliminar</button>
+                    </div>
+                </div>
+            `).join('');
+
+        } catch (error) {
+            console.error('Error al buscar productos:', error);
+            document.getElementById('adminProductos').innerHTML = 
+                '<div class="item">Error al buscar productos</div>';
+        }
+    };
+    </script>
+</head>
+<body>
+    <div id="app" class="container">
+        <!-- DEMO: barra rápida para verificar estilos -->
+        <div class="card" style="margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
+            <div>
+                <div class="breadcrumbs muted">Admin / Panel</div>
+                <h2 style="margin:6px 0 0">Panel de Administración — Demostración</h2>
+                <div class="muted" style="font-size:0.95rem">Este bloque sirve para comprobar la tipografía, colores y espaciado.</div>
+            </div>
+            <div class="actions">
+                <button class="btn btn-primary">Acción principal</button>
+                <button class="btn btn-ghost">Secundaria</button>
+            </div>
+        </div>
+        <!-- Modal de confirmación para eliminar -->
+        <div id="modalConfirmarEliminar" style="display:none;position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.4);z-index:1000;align-items:center;justify-content:center;">
+            <div style="background:#fff;padding:30px;border-radius:8px;max-width:400px;margin:auto;position:relative;">
+                <h3>Confirmar Eliminación</h3>
+                <p id="mensajeConfirmacion">¿Está seguro de que desea eliminar este elemento?</p>
+                <input type="hidden" id="eliminarId">
+                <input type="hidden" id="eliminarTipo">
+                <div style="margin-top:20px;text-align:right;">
+                    <button onclick="confirmarEliminacion()" class="btn primary">Eliminar</button>
+                    <button onclick="cerrarModalConfirmar()" class="btn secondary">Cancelar</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Modal de edición de categoría -->
+        <div id="modalEditarCategoria" style="display:none;position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.4);z-index:1000;align-items:center;justify-content:center;">
+            <div style="background:#fff;padding:30px;border-radius:8px;max-width:400px;margin:auto;position:relative;">
+                <h3>Editar Categoría</h3>
+                <form id="formEditarCategoria">
+                    <input type="hidden" id="editCatId">
+                    <label>Nombre:<input type="text" id="editCatNombre" class="input" required></label>
+                    <div style="margin-top:20px;text-align:right;">
+                        <button type="submit" class="btn primary">Guardar</button>
+                        <button type="button" onclick="cerrarModal('modalEditarCategoria')" class="btn secondary">Cancelar</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Modal de edición de talla -->
+        <div id="modalEditarTalla" style="display:none;position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.4);z-index:1000;align-items:center;justify-content:center;">
+            <div style="background:#fff;padding:30px;border-radius:8px;max-width:400px;margin:auto;position:relative;">
+                <h3>Editar Talla</h3>
+                <form id="formEditarTalla">
+                    <input type="hidden" id="editTallaId">
+                    <label>Nombre:<input type="text" id="editTallaNombre" class="input" required maxlength="10"></label><br>
+                    <label>Ajuste:
+                        <select id="editTallaAjuste" class="input" required>
+                            <option value="">Ajuste</option>
+                            <option value="Slim">Slim Fit</option>
+                            <option value="Regular">Regular Fit</option>
+                            <option value="Oversized">Oversized</option>
+                        </select>
+                    </label><br>
+                    <label>Pecho (cm):<input type="number" id="editTallaPecho" class="input" min="0"></label><br>
+                    <label>Cintura (cm):<input type="number" id="editTallaCintura" class="input" min="0"></label><br>
+                    <label>Cadera (cm):<input type="number" id="editTallaCadera" class="input" min="0"></label><br>
+                    <label>Largo (cm):<input type="number" id="editTallaLargo" class="input" min="0"></label><br>
+                    <div style="margin-top:20px;text-align:right;">
+                        <button type="submit" class="btn primary">Guardar</button>
+                        <button type="button" onclick="cerrarModal('modalEditarTalla')" class="btn secondary">Cancelar</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Modal de edición de proveedor -->
+        <div id="modalEditarProveedor" style="display:none;position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.4);z-index:1000;align-items:center;justify-content:center;">
+            <div style="background:#fff;padding:30px;border-radius:8px;max-width:400px;margin:auto;position:relative;">
+                <h3>Editar Proveedor</h3>
+                <form id="formEditarProveedor">
+                    <input type="hidden" id="editProvId">
+                    <label>Nombre:<input type="text" id="editProvNombre" class="input" required></label><br>
+                    <label>Contacto:<input type="text" id="editProvContacto" class="input"></label><br>
+                    <label>Teléfono:<input type="text" id="editProvTelefono" class="input"></label><br>
+                    <div style="margin-top:20px;text-align:right;">
+                        <button type="submit" class="btn primary">Guardar</button>
+                        <button type="button" onclick="cerrarModal('modalEditarProveedor')" class="btn secondary">Cancelar</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Modal de edición de producto -->
+        <div id="modalEditarProducto" style="display:none;position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.4);z-index:1000;align-items:center;justify-content:center;">
+            <div style="background:#fff;padding:30px;border-radius:8px;max-width:400px;margin:auto;position:relative;">
+                <h3>Editar Producto</h3>
+                <form id="formEditarProducto">
+                    <input type="hidden" id="editIdProducto">
+                    <label>Marca:<input type="text" id="editMarca" class="input" required></label><br>
+                    <label>Nombre:<input type="text" id="editNombre" class="input" required></label><br>
+                    <label>Categoría:
+                        <select id="editCategoria" class="input" required></select>
+                    </label><br>
+                    <label>Proveedor:
+                        <select id="editProveedor" class="input" required></select>
+                    </label><br>
+                    <label>Cantidad:<input type="number" id="editInventario" class="input" min="0" required></label><br>
+                    <label>Precio ($):<input type="number" id="editPrecio" class="input" step="0.01" required></label><br>
+                    <div style="margin-top:10px;text-align:right;">
+                        <button type="submit" class="btn primary">Guardar</button>
+                        <button type="button" class="btn" id="btnCerrarModal">Cancelar</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+        <header class="header">
+            <h1>ERP simple - Panel de Administración</h1>
+            <div id="statusDisplay" class="status-msg">Conectado</div>
+            
+            <div id="userPanel" class="user-panel">
+                <!-- Estos valores se llenarán con JS al cargar la página -->
+                <span id="userName" class="badge">Usuario</span>
+                <span id="rolLabel" class="badge role-badge">ADMIN</span>
+                <button id="logoutBtn" class="btn secondary">Cerrar sesión</button>
+            </div>
+        </header>
+
+        <main id="panelSection" class="card">
+            <h2 class="section-title">Panel de Control Principal</h2>
+            
+            <!-- MENÚ DE NAVEGACIÓN POR PESTAÑAS -->
+            <nav class="tab-nav">
+                <button id="tab-inventario" class="active" onclick="switchTab('inventario')">Gestión de Inventario</button>
+                <button id="tab-catalogo" onclick="switchTab('catalogo')">Catálogos (Tallas, Categorías, Proveedores)</button>
+                <button id="tab-transacciones" onclick="switchTab('transacciones')">Transacciones y Reportes (Ventas, Clientes, Caja)</button>
+            </nav>
+            
+            <!-- 1. GESTIÓN DE INVENTARIO Y PRODUCTOS -->
+            <div id="inventarioPanel" class="panel tabContent" style="display:block;">
+                <h3>Gestión de Productos</h3>
+                <div class="row header-row">
+                                        <h4>Crear Producto</h4>
+                                </div>
+                                <form id="form-producto-admin">
+                                    <div class="row form-row">
+                                        <div class="col">
+                                            <input id="prodMarca" placeholder="Marca" class="input" required>
+                                        </div>
+                                        <div class="col">
+                                            <select id="prodCategoria" class="input" required>
+                                                <option value="">Selecciona Categoría</option>
+                                                <!-- Opciones dinámicas -->
+                                            </select>
+                                        </div>
+                                        <div class="col">
+                                            <select id="prodProveedor" class="input" required>
+                                                <option value="">Selecciona Proveedor</option>
+                                                <!-- Opciones dinámicas -->
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div class="row form-row">
+                                        <div class="col">
+                                            <input id="prodNombre" placeholder="Nombre del Producto" class="input" required>
+                                        </div>
+                                        <div class="col">
+                                            <input id="prodPrecio" placeholder="Precio ($)" type="number" step="0.01" class="input" required>
+                                        </div>
+                                        <div class="col">
+                                            <input id="prodInventario" placeholder="Inventario total" type="number" min="0" class="input" required>
+                                        </div>
+                                    </div>
+                                                        <div class="row form-row">
+                                                            <fieldset style="border:1px solid #ccc; padding:10px;">
+                                                                <legend>Tallas y Cantidades</legend>
+                                                                <div id="tallas-dinamicas"></div>
+                                                            </fieldset>
+                                                        </div>
+                                    <div class="row form-row">
+                                        <button id="btnCrearProd" class="btn primary" type="submit">Registrar Producto</button>
+                                    </div>
+                                </form>
+                
+                <div class="row header-row">
+                    <h4>Listado de Productos</h4>
+                </div>
+                <div class="row form-row">
+                    <div class="col">
+                        <input id="prodBuscar" placeholder="Buscar por nombre" class="input">
+                    </div>
+                    <div class="col" style="flex: 0 0 auto;">
+                        <button id="btnBuscarProd" class="btn secondary">Buscar</button>
+                    </div>
+                </div>
+                
+                <div id="adminProductos" class="list">
+                    <div class="item">Cargando lista de productos...</div>
+                </div>
+            </div>
+
+            <!-- 2. CATÁLOGOS: TALLAS, CATEGORÍAS, PROVEEDORES -->
+            <div id="catalogoPanel" class="panel tabContent" style="display:none;">
+                <h2 style="color: #3b82f6;">Configuración de Catálogos</h2>
+                
+                <!-- Submenú dentro de Catálogos -->
+                <nav class="catalog-subnav" aria-label="Submenú Catálogos">
+                    <button id="cat-tab-categorias" class="active" onclick="switchCatalogTab('categorias')">Categorías</button>
+                    <button id="cat-tab-tallas" onclick="switchCatalogTab('tallas')">Tallas</button>
+                    <button id="cat-tab-proveedores" onclick="switchCatalogTab('proveedores')">Proveedores</button>
+                </nav>
+
+                <!-- Gestión de Categorías (Ejemplo de CRUD simple) -->
+                <div id="catalog-categorias" class="catalog-section">
+                    <h3>Gestión de Categorías</h3>
+                    <form id="form-categoria" class="row form-row">
+                        <div class="col">
+                            <input id="catNombre" name="catNombre" placeholder="Nueva Categoría (Ej: Camisetas)" class="input" required>
+                        </div>
+                        <div class="col" style="flex: 0 0 auto;">
+                            <button id="btnCrearCat" class="btn primary" type="submit">Crear Categoría</button>
+                        </div>
+                    </form>
+                    <div id="catalogoCategorias" class="list scroll-list">
+                        <div class="item"><span>Cargando categorías...</span><div class="actions"><button class="btn btn-small">Editar</button><button class="btn btn-small secondary">Eliminar</button></div></div>
+                    </div>
+                </div>
+
+                <!-- Gestión de Tallas -->
+                <div id="catalog-tallas" class="catalog-section" style="display:none;">
+                    <h3>Gestión de Tallas (S, M, L, XL)</h3>
+                    <form id="form-talla" class="row form-row">
+                        <div class="col">
+                            <input id="tallaNombre" name="tallaNombre" placeholder="Nombre de Talla (Ej: S, M, L, XL, 38)" class="input" required maxlength="10">
+                        </div>
+                        <div class="col">
+                            <select id="tallaAjuste" name="tallaAjuste" class="input" required>
+                                <option value="">Ajuste</option>
+                                <option value="Slim">Slim Fit</option>
+                                <option value="Regular">Regular Fit</option>
+                                <option value="Oversized">Oversized</option>
+                            </select>
+                        </div>
+                        <div class="col">
+                            <input id="tallaPecho" name="tallaPecho" placeholder="Pecho (cm)" class="input" type="number" min="0">
+                        </div>
+                        <div class="col">
+                            <input id="tallaCintura" name="tallaCintura" placeholder="Cintura (cm)" class="input" type="number" min="0">
+                        </div>
+                        <div class="col">
+                            <input id="tallaCadera" name="tallaCadera" placeholder="Cadera (cm)" class="input" type="number" min="0">
+                        </div>
+                        <div class="col">
+                            <input id="tallaLargo" name="tallaLargo" placeholder="Largo (cm)" class="input" type="number" min="0">
+                        </div>
+                        <div class="col" style="flex: 0 0 auto;">
+                            <button id="btnCrearTalla" class="btn primary" type="submit">Crear Talla</button>
+                        </div>
+                    </form>
+                    <div id="catalogoTallas" class="list scroll-list">
+                        <div class="item"><span>Cargando tallas...</span><div class="actions"><button class="btn btn-small">Editar</button><button class="btn btn-small secondary">Eliminar</button></div></div>
+                    </div>
+                </div>
+
+                <!-- Gestión de Proveedores -->
+                <div id="catalog-proveedores" class="catalog-section" style="display:none;">
+                    <h3>Gestión de Proveedores</h3>
+                    <form id="form-proveedor" class="row form-row">
+                        <div class="col">
+                            <input id="provNombre" name="provNombre" placeholder="Nombre del Proveedor" class="input" required>
+                        </div>
+                        <div class="col">
+                            <input id="provContacto" name="provContacto" placeholder="Contacto" class="input">
+                        </div>
+                        <div class="col">
+                            <input id="provTelefono" name="provTelefono" placeholder="Teléfono" class="input">
+                        </div>
+                        <div class="col" style="flex: 0 0 auto;">
+                            <button id="btnCrearProv" class="btn primary" type="submit">Crear Proveedor</button>
+                        </div>
+                    </form>
+                    <div id="catalogoProveedores" class="list scroll-list">
+                        <div class="item"><span>Cargando proveedores...</span><div class="actions"><button class="btn btn-small">Editar</button><button class="btn btn-small secondary">Eliminar</button></div></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 3. TRANSACCIONES Y REPORTES -->
+            <div id="transaccionesPanel" class="panel tabContent" style="display:none;">
+                <h2 style="color: #3b82f6;">Reportes y Movimientos</h2>
+                <!-- Reportes Gerenciales -->
+                <h3>Indicadores Gerenciales</h3>
+                <ul>
+                  <li>Rotación de Inventario</li>
+                  <li>Análisis de Ventas por Temporada (seleccionable)</li>
+                  <li>Control de Margen de Ganancias por Categoría</li>
+                  <li>Reporte de Utilidad por Producto</li>
+                </ul>
+                <!-- Placeholder para Ventas -->
+                <h3>Listado de Ventas (Facturas)</h3>
+                <div id="reporteVentas" class="list">
+                    <div class="item">Cargando ventas recientes...</div>
+                </div>
+                <!-- Placeholder para Movimientos de Caja -->
+                <h3>Movimientos Contables y de Caja</h3>
+                <div id="reporteCaja" class="list">
+                    <div class="item">Cargando movimientos contables...</div>
+                </div>
+                <!-- Placeholder para Clientes -->
+                <h3>Listado de Clientes</h3>
+                <div id="reporteClientes" class="list">
+                    <div class="item">Cargando lista de clientes...</div>
+                </div>
+                <!-- Placeholder para Compras -->
+                <h3>Listado de Órdenes de Compra</h3>
+                <div id="reporteCompras" class="list">
+                    <div class="item">Cargando lista de compras...</div>
+                </div>
+                <!-- Placeholder para Devoluciones -->
+                <h3>Gestión de Devoluciones (Clave requerida)</h3>
+                <form id="form-devolucion">
+                  <label>Clave de acceso:<input type="password" id="claveDevolucion" required></label>
+                  <button type="submit" class="btn secondary">Acceder</button>
+                </form>
+                <div id="panelDevoluciones" style="display:none;">
+                  <label>Buscar venta por fecha y hora:<input type="datetime-local" id="buscaVentaFecha"></label>
+                  <button id="btnBuscarVenta" class="btn">Buscar Venta</button>
+                  <div id="devolucionResultados"></div>
+                </div>
+            </div>
+            
+        </main>
+    </div>
+    <script src="cliente.js"></script>
+</body>
+</html>
