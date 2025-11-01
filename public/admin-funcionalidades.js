@@ -248,26 +248,83 @@ async function registrarCliente(e) {
 
 async function cargarClientes() {
     try {
-        const res = await fetch('/api/clientes');
+        // Usar endpoint optimizado que devuelve clientes con resumen (evita N requests por cliente)
+        const page = 1;
+        const per_page = 200;
+        const res = await fetch(`/api/admin/clientes/resumen?page=${page}&per_page=${per_page}`, { credentials: 'include' });
         const data = await res.json();
         const lista = document.getElementById('listaClientesAdmin');
-        if (lista && data.clientes) {
-            lista.innerHTML = data.clientes.map(cli => `
+        if (!lista) return;
+
+        if (!data || !data.clientes || data.clientes.length === 0) {
+            lista.innerHTML = '<div class="item">No se encontraron clientes con compras registradas.</div>';
+            return;
+        }
+
+        // Umbral para considerar "frecuente" (ajustable)
+        const UMBRAL_FRECUENTE = 3;
+
+        lista.innerHTML = data.clientes.map(cli => {
+            const frecuente = (Number(cli.compras_count) >= UMBRAL_FRECUENTE) ? ' (Frecuente)' : '';
+            return `
                 <div class="item">
                     <div>
-                        <strong>${cli.nombre}</strong><br>
-                        Cédula: ${cli.cedula || 'N/A'} | Tel: ${cli.telefono || 'N/A'} | Email: ${cli.email || 'N/A'}
+                        <strong>${cli.nombre || 'Sin nombre'}${frecuente}</strong><br>
+                        Cédula: ${cli.cedula || 'N/A'} | Tel: ${cli.telefono || 'N/A'} | Email: ${cli.email || 'N/A'}<br>
+                        <small>Compras: ${cli.compras_count} | Total: $${Number(cli.total_gastado||0).toFixed(2)}</small>
                     </div>
                     <div class="actions">
                         <button class="btn btn-small" onclick="editarCliente(${cli.id_cliente})">Editar</button>
+                        <button class="btn btn-small secondary" onclick="verHistorialCliente(${cli.id_cliente}, '${(cli.nombre||'').replace(/'/g, "\\'")}', '${cli.cedula || ''}')">Ver historial</button>
                     </div>
                 </div>
-            `).join('');
+            `;
+        }).join('');
+
+        // Modal simple para historial de compras de cliente (si no existe, crearlo)
+        if (!document.getElementById('modalHistorialCliente')) {
+            const modal = document.createElement('div');
+            modal.id = 'modalHistorialCliente';
+            modal.style = 'display:none;position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.4);z-index:9999;align-items:center;justify-content:center;';
+            modal.innerHTML = `<div style="background:#fff;padding:24px;max-width:500px;width:90vw;border-radius:8px;box-shadow:0 2px 16px #0002;position:relative;">
+                <button id="cerrarModalHistorialCliente" style="position:absolute;top:8px;right:8px;font-size:1.2em;">&times;</button>
+                <div id="contenidoHistorialCliente">Cargando...</div>
+            </div>`;
+            document.body.appendChild(modal);
+            document.getElementById('cerrarModalHistorialCliente').onclick = () => { modal.style.display = 'none'; };
         }
+
     } catch (error) {
         console.error('Error cargando clientes:', error);
     }
 }
+
+// Función para abrir modal y mostrar historial (usa endpoint existente)
+window.verHistorialCliente = async function(id_cliente, nombre, cedula) {
+    const modal = document.getElementById('modalHistorialCliente');
+    const contenido = document.getElementById('contenidoHistorialCliente');
+    if (!modal || !contenido) return;
+    modal.style.display = 'flex';
+    contenido.innerHTML = `<b>${nombre}</b><br>Cédula: ${cedula}<br><br>Cargando historial...`;
+    try {
+        const res = await fetch(`/api/admin/clientes/ventas?cedula=${encodeURIComponent(cedula)}`, { credentials: 'include' });
+        const data = await res.json();
+        if (!data.ok || !data.ventas || data.ventas.length === 0) {
+            contenido.innerHTML = `<b>${nombre}</b><br>Cédula: ${cedula}<br><br>No hay compras registradas para este cliente.`;
+            return;
+        }
+        const total = data.total || data.ventas.reduce((sum, v) => sum + (parseFloat(v.total_venta)||0), 0);
+        const frecuencia = data.count || data.ventas.length;
+        const detalle = data.ventas.map(v => `<li>Venta #${v.id_venta} - ${v.fecha_hora} - $${parseFloat(v.total_venta||0).toFixed(2)}</li>`).join('');
+        contenido.innerHTML = `<b>${nombre}</b><br>Cédula: ${cedula}<br><br>
+            <b>Compras registradas:</b> ${frecuencia}<br>
+            <b>Monto total:</b> $${Number(total).toFixed(2)}<br><br>
+            <b>Historial:</b><ul style='margin:8px 0 0 16px;padding:0;'>${detalle}</ul>`;
+    } catch (e) {
+        console.error('Error al cargar historial cliente:', e);
+        contenido.innerHTML = `<b>${nombre}</b><br>Cédula: ${cedula}<br><br>Error al cargar historial.`;
+    }
+};
 
 // ==================== FUNCIONES DE PROMOCIONES ====================
 async function crearPromocion(e) {

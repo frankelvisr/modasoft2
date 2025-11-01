@@ -765,16 +765,26 @@ app.get('/api/admin/ventas', requiereRol('administrador'), async (req, res) => {
     const startStr = `${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2, '0')}-01 00:00:00`;
     const endStr = `${end.getFullYear()}-${String(end.getMonth() + 1).padStart(2, '0')}-01 00:00:00`;
 
-    // 1) Obtener ventas en el rango
+    // Preparar posible filtro por cédula de cliente (req.query.cliente)
+    const clienteCedula = req.query.cliente ? String(req.query.cliente).trim() : null;
+
+    // 1) Obtener ventas en el rango (con opcional filtro por cédula)
+    let baseWhere = 'v.fecha_hora >= ? AND v.fecha_hora < ?';
+    const ventasParams = [startStr, endStr];
+    if (clienteCedula) {
+      baseWhere += ' AND c.cedula = ?';
+      ventasParams.push(clienteCedula);
+    }
+
     const [ventasRows] = await pool.query(
-      `SELECT v.id_venta, v.fecha_hora, v.total_venta, v.tipo_pago, u.usuario AS usuario, c.nombre AS cliente
+      `SELECT v.id_venta, v.fecha_hora, v.total_venta, v.tipo_pago, u.usuario AS usuario, c.nombre AS cliente, c.cedula AS cliente_cedula
        FROM ventas v
        LEFT JOIN usuarios u ON v.id_usuario = u.id_usuario
        LEFT JOIN clientes c ON v.id_cliente = c.id_cliente
-       WHERE v.fecha_hora >= ? AND v.fecha_hora < ?
+       WHERE ${baseWhere}
        ORDER BY v.fecha_hora DESC
       `,
-      [startStr, endStr]
+      ventasParams
     );
 
     // 2) Obtener detalle para cada venta (optimizable, pero suficiente para volúmenes moderados)
@@ -792,26 +802,107 @@ app.get('/api/admin/ventas', requiereRol('administrador'), async (req, res) => {
     }
 
     // 3) Totales del mes
-    const [tot] = await pool.query(
-      `SELECT IFNULL(SUM(total_venta),0) AS total_mes, COUNT(*) AS ventas_count FROM ventas WHERE fecha_hora >= ? AND fecha_hora < ?`,
-      [startStr, endStr]
-    );
+    // 3) Totales del mes (aplicar mismo filtro por cliente si existe)
+    let totQuery = 'SELECT IFNULL(SUM(total_venta),0) AS total_mes, COUNT(*) AS ventas_count FROM ventas v';
+    let totParams = [startStr, endStr];
+    if (clienteCedula) {
+      totQuery += ' LEFT JOIN clientes c ON v.id_cliente = c.id_cliente WHERE v.fecha_hora >= ? AND v.fecha_hora < ? AND c.cedula = ?';
+      totParams.push(clienteCedula);
+    } else {
+      totQuery += ' WHERE v.fecha_hora >= ? AND v.fecha_hora < ?';
+    }
+    const [tot] = await pool.query(totQuery, totParams);
     const total_mes = (Array.isArray(tot) && tot[0]) ? tot[0].total_mes : (tot.total_mes || 0);
 
     // 4) Totales por día (para gráficas)
-    const [porDia] = await pool.query(
-      `SELECT DATE(fecha_hora) AS dia, SUM(total_venta) AS total, COUNT(*) AS ventas
-       FROM ventas
-       WHERE fecha_hora >= ? AND fecha_hora < ?
-       GROUP BY DATE(fecha_hora)
-       ORDER BY DATE(fecha_hora) ASC`,
-      [startStr, endStr]
-    );
+    // 4) Totales por día (aplicar filtro por cliente si existe)
+    let porDiaQuery = `SELECT DATE(v.fecha_hora) AS dia, SUM(v.total_venta) AS total, COUNT(*) AS ventas
+       FROM ventas v`;
+    const porDiaParams = [startStr, endStr];
+    if (clienteCedula) {
+      porDiaQuery += ' LEFT JOIN clientes c ON v.id_cliente = c.id_cliente WHERE v.fecha_hora >= ? AND v.fecha_hora < ? AND c.cedula = ?';
+      porDiaParams.push(clienteCedula);
+    } else {
+      porDiaQuery += ' WHERE v.fecha_hora >= ? AND v.fecha_hora < ?';
+    }
+    porDiaQuery += ' GROUP BY DATE(v.fecha_hora) ORDER BY DATE(v.fecha_hora) ASC';
+    const [porDia] = await pool.query(porDiaQuery, porDiaParams);
 
     res.json({ ok: true, ventas: ventasRows, totales: { total_mes: Number(total_mes), count: tot[0] ? tot[0].ventas_count : 0 }, por_dia: porDia, year, month });
   } catch (e) {
     console.error('Error listar ventas admin:', e.message || e);
     res.status(500).json({ ok: false, ventas: [], message: 'Error al consultar ventas' });
+  }
+});
+
+// Endpoint optimizado: listar clientes con resumen de compras (count, total)
+app.get('/api/admin/clientes/resumen', requiereRol('administrador'), async (req, res) => {
+  try {
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const per_page = Math.max(1, Math.min(500, Number(req.query.per_page) || 100));
+    const offset = (page - 1) * per_page;
+
+    // Obtener clientes que tengan al menos una venta, con conteo y total gastado
+    const [rows] = await pool.query(
+      `SELECT c.id_cliente, c.nombre, c.cedula, c.telefono, c.email,
+              COUNT(v.id_venta) AS compras_count, IFNULL(SUM(v.total_venta),0) AS total_gastado, MAX(v.fecha_hora) AS ultima_compra
+       FROM clientes c
+       JOIN ventas v ON v.id_cliente = c.id_cliente
+       GROUP BY c.id_cliente
+       HAVING compras_count > 0
+       ORDER BY total_gastado DESC
+       LIMIT ? OFFSET ?`,
+      [per_page, offset]
+    );
+
+    // Opcional: contar total de clientes con compras (para paginación)
+    const [cntRows] = await pool.query(
+      `SELECT COUNT(DISTINCT c.id_cliente) AS total_clients_with_purchases FROM clientes c JOIN ventas v ON v.id_cliente = c.id_cliente`
+    );
+    const total_clients = (Array.isArray(cntRows) && cntRows[0]) ? Number(cntRows[0].total_clients_with_purchases) : 0;
+
+    res.json({ ok: true, clientes: rows, page, per_page, total_clients });
+  } catch (e) {
+    console.error('Error listar clientes resumen admin:', e.message || e);
+    res.status(500).json({ ok: false, clientes: [], page: 1, per_page: 0, total_clients: 0, message: 'Error del servidor' });
+  }
+});
+
+// Endpoint administrativo: obtener ventas (historial) completas de un cliente por cédula
+app.get('/api/admin/clientes/ventas', requiereRol('administrador'), async (req, res) => {
+  try {
+    const cedula = req.query.cedula ? String(req.query.cedula).trim() : null;
+    if (!cedula) return res.json({ ok: false, ventas: [], total: 0, count: 0, message: 'Cédula requerida' });
+
+    const [ventasRows] = await pool.query(
+      `SELECT v.id_venta, v.fecha_hora, v.total_venta, v.tipo_pago, u.usuario AS usuario
+       FROM ventas v
+       LEFT JOIN usuarios u ON v.id_usuario = u.id_usuario
+       LEFT JOIN clientes c ON v.id_cliente = c.id_cliente
+       WHERE c.cedula = ?
+       ORDER BY v.fecha_hora DESC`,
+      [cedula]
+    );
+
+    // Agregar detalle de cada venta
+    for (const v of ventasRows) {
+      const [det] = await pool.query(
+        `SELECT d.id_producto, p.marca, p.nombre AS producto, d.id_talla, t.nombre AS talla, d.cantidad, d.precio_unitario
+         FROM detalleventa d
+         LEFT JOIN productos p ON d.id_producto = p.id_producto
+         LEFT JOIN tallas t ON d.id_talla = t.id_talla
+         WHERE d.id_venta = ?`,
+        [v.id_venta]
+      );
+      v.detalle = det;
+    }
+
+    const total = ventasRows.reduce((s, v) => s + (Number(v.total_venta) || 0), 0);
+    const count = ventasRows.length;
+    return res.json({ ok: true, ventas: ventasRows, total, count });
+  } catch (e) {
+    console.error('Error historial cliente admin:', e.message || e);
+    return res.status(500).json({ ok: false, ventas: [], total: 0, count: 0, message: 'Error del servidor' });
   }
 });
 

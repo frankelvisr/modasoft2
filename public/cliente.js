@@ -720,19 +720,27 @@ document.addEventListener('DOMContentLoaded', () => {
             const cedula = inputCedula.value.trim();
             if (!cedula) return;
             try {
-                const res = await fetch(`/api/clientes/buscar?cedula=${encodeURIComponent(cedula)}`);
+                // Incluir credenciales (cookies de sesión) para rutas protegidas
+                const res = await fetch(`/api/clientes/buscar?cedula=${encodeURIComponent(cedula)}`, { credentials: 'include' });
+                if (!res.ok) {
+                    // Si no está autenticado o hay error, no sobreescribir campos
+                    console.warn('No se pudo buscar cliente (estado:', res.status, ')');
+                    return;
+                }
                 const data = await res.json();
-                if (data.cliente) {
-                    inputNombre.value = data.cliente.nombre;
-                    // Uso seguro de inputTelefono e inputEmail
+                if (data && data.cliente) {
+                    inputNombre.value = data.cliente.nombre || '';
                     if (inputTelefono) inputTelefono.value = data.cliente.telefono || '';
                     if (inputEmail) inputEmail.value = data.cliente.email || '';
                 } else {
+                    // No existe: dejar los campos para que el cajero los complete
                     inputNombre.value = '';
                     if (inputTelefono) inputTelefono.value = '';
                     if (inputEmail) inputEmail.value = '';
                 }
-            } catch {}
+            } catch (err) {
+                console.error('Error buscando cliente por cédula:', err);
+            }
         });
         // Actualizar totales automáticamente
         const precioUnitario = document.getElementById('ventaPrecioUnitario');
