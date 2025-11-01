@@ -39,6 +39,53 @@ app.get('/api/status', async (req, res) => {
   res.json({ servidor: true, bd: bdOK, usuario: user ? user.usuario : null, rol: rol });
 });
 
+// Endpoint para indicadores del dashboard (ventas del mes, serie por día, rotación básica)
+app.get('/api/dashboard/indicadores', requiereRol('administrador'), async (req, res) => {
+  try {
+    const now = new Date();
+    const year = Number(req.query.year) || now.getFullYear();
+    const month = Number(req.query.month) || (now.getMonth() + 1);
+    const start = new Date(year, month - 1, 1);
+    const end = new Date(year, month, 1);
+    const startStr = `${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2,'0')}-01 00:00:00`;
+    const endStr = `${end.getFullYear()}-${String(end.getMonth() + 1).padStart(2,'0')}-01 00:00:00`;
+
+    // Ventas del mes (total en $)
+    const [tot] = await pool.query('SELECT IFNULL(SUM(total_venta),0) AS total_mes FROM ventas WHERE fecha_hora >= ? AND fecha_hora < ?', [startStr, endStr]);
+    const ventasMes = tot && tot[0] ? Number(tot[0].total_mes) : 0;
+
+    // Serie diaria para gráfico
+    const [porDia] = await pool.query(
+      `SELECT DATE(fecha_hora) AS dia, IFNULL(SUM(total_venta),0) AS ingreso_total FROM ventas WHERE fecha_hora >= ? AND fecha_hora < ? GROUP BY DATE(fecha_hora) ORDER BY DATE(fecha_hora) ASC`,
+      [startStr, endStr]
+    );
+
+    // Comparación con mes anterior
+    const prevStart = new Date(year, month - 2, 1);
+    const prevEnd = new Date(year, month - 1, 1);
+    const prevStartStr = `${prevStart.getFullYear()}-${String(prevStart.getMonth() + 1).padStart(2,'0')}-01 00:00:00`;
+    const prevEndStr = `${prevEnd.getFullYear()}-${String(prevEnd.getMonth() + 1).padStart(2,'0')}-01 00:00:00`;
+    const [prevTot] = await pool.query('SELECT IFNULL(SUM(total_venta),0) AS total_prev FROM ventas WHERE fecha_hora >= ? AND fecha_hora < ?', [prevStartStr, prevEndStr]);
+    const totalPrev = prevTot && prevTot[0] ? Number(prevTot[0].total_prev) : 0;
+    const ventasCambio = totalPrev > 0 ? ((ventasMes - totalPrev) / totalPrev) * 100 : (ventasMes > 0 ? 100 : 0);
+
+    // Rotación de inventario básica: unidades vendidas / stock total
+    const [unidades] = await pool.query(
+      `SELECT IFNULL(SUM(d.cantidad),0) AS unidades_vendidas FROM detalleventa d JOIN ventas v ON d.id_venta = v.id_venta WHERE v.fecha_hora >= ? AND v.fecha_hora < ?`,
+      [startStr, endStr]
+    );
+    const unidadesVendidas = unidades && unidades[0] ? Number(unidades[0].unidades_vendidas) : 0;
+    const [stock] = await pool.query('SELECT IFNULL(SUM(inventario),0) AS stock_total FROM productos');
+    const stockTotal = stock && stock[0] ? Number(stock[0].stock_total) : 0;
+    const rotacionInventario = stockTotal > 0 ? unidadesVendidas / stockTotal : 0;
+
+    res.json({ ventasMes, ventasTemporada: porDia, ventasCambio, rotacionInventario, margenGanancia: 0, stockBajo: 0 });
+  } catch (e) {
+    console.error('Error indicadores dashboard:', e.message || e);
+    res.status(500).json({ error: 'Error al calcular indicadores' });
+  }
+});
+
 // Ruta de login
 app.post('/api/login', async (req, res) => {
   const { usuario, password } = req.body;
@@ -113,7 +160,7 @@ app.put('/api/categorias/:id', requiereRol('administrador'), async (req, res) =>
   const { nombre } = req.body;
   if (!nombre || nombre.trim() === '') return res.status(400).json({ success: false, message: 'Nombre requerido' });
   try {
-    const [result] = await pool.query('UPDATE Categorias SET nombre = ? WHERE id_categoria = ?', [nombre.trim(), id]);
+  const [result] = await pool.query('UPDATE categorias SET nombre = ? WHERE id_categoria = ?', [nombre.trim(), id]);
     if (result.affectedRows > 0) return res.json({ success: true });
     return res.status(404).json({ success: false, message: 'Categoría no encontrada' });
   } catch (e) {
@@ -267,16 +314,28 @@ app.post('/api/proveedores', requiereRol('administrador'), async (req, res) => {
 app.post('/api/productos', requiereRol('administrador'), async (req, res) => {
   const { marca, categoria, proveedor, nombre, precio, inventario, cantidades } = req.body;
   try {
+    // Validar que la suma de cantidades por talla no exceda el inventario total
+    const totalInventario = Number(inventario) || 0;
+    let sumaTallas = 0;
+    if (Array.isArray(cantidades)) {
+      for (const t of cantidades) {
+        sumaTallas += Number(t.cantidad) || 0;
+      }
+    }
+    if (sumaTallas > totalInventario) {
+      return res.status(400).json({ ok: false, message: `La suma de las cantidades por talla (${sumaTallas}) excede el inventario total (${totalInventario}). Ajusta los valores.` });
+    }
+
     // 1. Insertar producto principal
     const [prodResult] = await pool.query(
       'INSERT INTO productos (nombre, marca, precio_venta, inventario, id_categoria, id_proveedor) VALUES (?, ?, ?, ?, ?, ?)',
       [nombre, marca, precio, inventario, categoria, proveedor]
     );
     const id_producto = prodResult.insertId;
-    // 2. Insertar cantidades por talla en InventarioTallas
+    // 2. Insertar cantidades por talla en Inventario
     if (Array.isArray(cantidades)) {
       for (const t of cantidades) {
-  await pool.query('INSERT INTO inventario (id_producto, id_talla, cantidad) VALUES (?, ?, ?)', [id_producto, t.id_talla, t.cantidad]);
+        await pool.query('INSERT INTO inventario (id_producto, id_talla, cantidad) VALUES (?, ?, ?)', [id_producto, t.id_talla, t.cantidad]);
       }
     }
     res.json({ ok: true, id_producto });
@@ -429,34 +488,75 @@ app.post('/api/ventas', requiereRol('caja'), async (req, res) => {
   if (!cliente_nombre || !cliente_cedula || isNaN(totalVenta) || totalVenta <= 0) {
     return res.status(400).json({ ok: false, message: 'Datos de venta incompletos o inválidos.' });
   }
+  let conn;
+  let agotado = false;
   try {
-    // 1. Buscar o crear cliente
+    conn = await pool.getConnection();
+    await conn.beginTransaction();
+
+    // 1. Buscar o crear cliente (usando la conexión de la transacción)
     let id_cliente = null;
-    const [cliRows] = await pool.query('SELECT id_cliente FROM clientes WHERE cedula = ?', [cliente_cedula]);
+    const [cliRows] = await conn.query('SELECT id_cliente FROM clientes WHERE cedula = ? LIMIT 1', [cliente_cedula]);
     if (cliRows.length > 0) {
       id_cliente = cliRows[0].id_cliente;
     } else {
-      const [cliRes] = await pool.query('INSERT INTO clientes (nombre, cedula, telefono, email) VALUES (?, ?, ?, ?)', [cliente_nombre, cliente_cedula, cliente_telefono || '', cliente_email || '']);
+      const [cliRes] = await conn.query('INSERT INTO clientes (nombre, cedula, telefono, email) VALUES (?, ?, ?, ?)', [cliente_nombre, cliente_cedula, cliente_telefono || '', cliente_email || '']);
       id_cliente = cliRes.insertId;
     }
+
+    // Buscar id_producto por marca (simplificado)
+    const [prodRows] = await conn.query('SELECT id_producto FROM productos WHERE marca = ? LIMIT 1', [marca]);
+    let id_producto = prodRows.length > 0 ? prodRows[0].id_producto : null;
+    // Buscar id_talla
+    const [tallaRows] = await conn.query('SELECT id_talla FROM tallas WHERE nombre = ?', [talla]);
+    let id_talla = tallaRows.length > 0 ? tallaRows[0].id_talla : null;
+
+    // Si tenemos producto y talla, verificar stock por talla
+    if (id_producto && id_talla) {
+      const [invRows] = await conn.query('SELECT cantidad FROM inventario WHERE id_producto = ? AND id_talla = ? LIMIT 1', [id_producto, id_talla]);
+      if (invRows.length === 0) {
+        await conn.rollback();
+        conn.release();
+        return res.status(400).json({ ok: false, message: 'No hay inventario para ese producto/talla.' });
+      }
+      const disponible = Number(invRows[0].cantidad) || 0;
+      if (disponible === 0) {
+        await conn.rollback();
+        conn.release();
+        return res.status(400).json({ ok: false, message: 'No hay unidades disponibles para la talla seleccionada.' });
+      }
+      if (disponible < cantidadNum) {
+        await conn.rollback();
+        conn.release();
+        return res.status(400).json({ ok: false, message: `Stock insuficiente. Disponible: ${disponible}` });
+      }
+      // Si la venta procede y consume todas las unidades disponibles
+      agotado = (disponible - cantidadNum) <= 0;
+    }
+
     // 2. Registrar venta principal
-    const [ventaRes] = await pool.query(
+    const [ventaRes] = await conn.query(
       'INSERT INTO ventas (fecha_hora, total_venta, tipo_pago, id_usuario, id_cliente) VALUES (NOW(), ?, ?, ?, ?)',
       [totalVenta, tipo_pago || 'Efectivo', req.session.user.id, id_cliente]
     );
     const id_venta = ventaRes.insertId;
-    // 3. Registrar detalle de venta
-    // Buscar id_producto por marca (simplificado)
-    const [prodRows] = await pool.query('SELECT id_producto FROM productos WHERE marca = ? LIMIT 1', [marca]);
-    let id_producto = prodRows.length > 0 ? prodRows[0].id_producto : null;
-    // Buscar id_talla
-    const [tallaRows] = await pool.query('SELECT id_talla FROM tallas WHERE nombre = ?', [talla]);
-    let id_talla = tallaRows.length > 0 ? tallaRows[0].id_talla : null;
+
+    // 3. Registrar detalle de venta y actualizar inventario si aplica
     if (id_producto && id_talla) {
-      await pool.query('INSERT INTO detalleventa (id_venta, id_producto, id_talla, cantidad, precio_unitario) VALUES (?, ?, ?, ?, ?)', [id_venta, id_producto, id_talla, cantidadNum, precioNum]);
+      await conn.query('INSERT INTO detalleventa (id_venta, id_producto, id_talla, cantidad, precio_unitario) VALUES (?, ?, ?, ?, ?)', [id_venta, id_producto, id_talla, cantidadNum, precioNum]);
+      // actualizar inventario por talla (evitar negativos)
+      await conn.query('UPDATE inventario SET cantidad = GREATEST(0, cantidad - ?) WHERE id_producto = ? AND id_talla = ?', [cantidadNum, id_producto, id_talla]);
+      // actualizar stock total en productos (si existe columna inventario)
+      await conn.query('UPDATE productos SET inventario = GREATEST(0, inventario - ?) WHERE id_producto = ?', [cantidadNum, id_producto]);
     }
-    res.json({ ok: true, id_venta });
+
+    await conn.commit();
+    conn.release();
+    res.json({ ok: true, id_venta, agotado });
   } catch (e) {
+    if (conn) {
+      try { await conn.rollback(); conn.release(); } catch (_) {}
+    }
     console.error(e);
     res.status(500).json({ error: 'Error al registrar venta' });
   }
@@ -477,7 +577,7 @@ app.post('/api/caja/venta', requiereRol('caja'), async (req, res) => {
   try {
     // 1) Crear venta (en tabla Ventas)
     const [ventaResult] = await pool.query(
-      `INSERT INTO Ventas (fecha_hora, total_venta, tipo_pago, id_usuario, id_cliente)
+      `INSERT INTO ventas (fecha_hora, total_venta, tipo_pago, id_usuario, id_cliente)
        VALUES (NOW(), ?, ?, ?, ?)`,
       [total_venta, tipo_pago, req.session.user.id, id_cliente || null]
     );
@@ -613,7 +713,10 @@ app.post('/api/ventas', requiereRol('caja'), async (req, res) => {
     if (invRows.length === 0) {
       return res.status(400).json({ ok: false, message: 'No hay inventario para ese producto/talla.' });
     }
-    const disponible = invRows[0].cantidad || 0;
+    const disponible = Number(invRows[0].cantidad) || 0;
+    if (disponible === 0) {
+      return res.status(400).json({ ok: false, message: 'No hay unidades disponibles para la talla seleccionada.' });
+    }
     if (disponible < cantidad) {
       return res.status(400).json({ ok: false, message: `Stock insuficiente. Disponible: ${disponible}` });
     }
@@ -635,12 +738,14 @@ app.post('/api/ventas', requiereRol('caja'), async (req, res) => {
 
     // 4. Registrar detalleventa y actualizar inventario
     await pool.query('INSERT INTO detalleventa (id_venta, id_producto, id_talla, cantidad, precio_unitario) VALUES (?, ?, ?, ?, ?)', [id_venta, id_producto, id_talla, cantidad, precio_unitario || 0]);
-    // actualizar inventario por talla
-    await pool.query('UPDATE inventario SET cantidad = cantidad - ? WHERE id_producto = ? AND id_talla = ?', [cantidad, id_producto, id_talla]);
+    // calcular si la venta agotó la talla
+    const agotado = (disponible - cantidad) <= 0;
+    // actualizar inventario por talla (evitar negativos)
+    await pool.query('UPDATE inventario SET cantidad = GREATEST(0, cantidad - ?) WHERE id_producto = ? AND id_talla = ?', [cantidad, id_producto, id_talla]);
     // actualizar stock total en productos (si existe columna inventario)
     await pool.query('UPDATE productos SET inventario = GREATEST(0, inventario - ?) WHERE id_producto = ?', [cantidad, id_producto]);
 
-    res.json({ ok: true, id_venta });
+    res.json({ ok: true, id_venta, agotado });
   } catch (e) {
     console.error('Error al registrar venta:', e.message);
     res.status(500).json({ ok: false, message: 'Error al registrar venta' });
@@ -674,8 +779,9 @@ app.get('/api/admin/ventas', requiereRol('administrador'), async (req, res) => {
 
     // 2) Obtener detalle para cada venta (optimizable, pero suficiente para volúmenes moderados)
     for (const v of ventasRows) {
+      // Evitar referenciar columnas que pueden no existir en esquemas distintos.
       const [det] = await pool.query(
-        `SELECT d.id_detalleventa, d.id_producto, p.marca, p.nombre AS producto, d.id_talla, t.nombre AS talla, d.cantidad, d.precio_unitario
+        `SELECT d.id_producto, p.marca, p.nombre AS producto, d.id_talla, t.nombre AS talla, d.cantidad, d.precio_unitario
          FROM detalleventa d
          LEFT JOIN productos p ON d.id_producto = p.id_producto
          LEFT JOIN tallas t ON d.id_talla = t.id_talla

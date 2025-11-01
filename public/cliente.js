@@ -881,7 +881,35 @@ document.addEventListener('DOMContentLoaded', () => {
                 alert('Completa todos los campos del cliente, agrega productos al carrito y selecciona el tipo de pago.');
                 return;
             }
-            
+            // 1) Validar stock actual PARA TODO EL CARRITO antes de enviar cualquier venta.
+            try {
+                for (const item of carrito) {
+                    // Obtener estado actual del producto (incluye tallas)
+                    const resCheck = await fetch(`/api/productos/${encodeURIComponent(item.idProd)}`);
+                    if (!resCheck.ok) {
+                        alert('Error al verificar stock de productos. Intenta de nuevo.');
+                        return;
+                    }
+                    const dataCheck = await resCheck.json();
+                    const tallas = dataCheck.producto ? dataCheck.producto.tallas : [];
+                    const t = tallas.find(tt => String(tt.id_talla) === String(item.idTalla) || tt.id_talla == item.idTalla);
+                    const disponible = t ? Number(t.cantidad) : 0;
+                    if (disponible === 0) {
+                        alert(`No hay unidades disponibles para ${item.marcaProd} - ${item.nombreProd} (${item.nombreTalla}). La venta fue cancelada.`);
+                        return;
+                    }
+                    if (disponible < item.cantidad) {
+                        alert(`Stock insuficiente para ${item.marcaProd} - ${item.nombreProd} (${item.nombreTalla}). Disponible: ${disponible}. Ajusta la cantidad.`);
+                        return;
+                    }
+                }
+            } catch (e) {
+                console.error('Error al validar stock antes de venta:', e);
+                alert('Error de conexión al verificar stock. Intenta de nuevo.');
+                return;
+            }
+
+            // 2) Si todas las líneas pasan la validación, proceder a registrar cada venta individualmente.
             let ok = true;
             for (const item of carrito) {
                 const body = {
@@ -907,10 +935,19 @@ document.addEventListener('DOMContentLoaded', () => {
                         ok = false;
                         console.error('Error al registrar venta de producto:', item.nombreProd, data.message || data.error);
                         alert('Error en venta: ' + (data.message || data.error || 'Revise la consola.'));
+                        // No continuar con más envíos si uno falla
+                        break;
+                    } else {
+                        // Si el servidor indica que la talla quedó agotada, informarlo al usuario
+                        if (data.agotado) {
+                            alert(`Atención: La talla ${item.nombreTalla} del producto ${item.marcaProd} - ${item.nombreProd} se ha agotado.`);
+                        }
                     }
                 } catch (e) { 
                     ok = false; 
                     console.error('Error de conexión al registrar venta:', e);
+                    alert('Error de conexión al registrar venta. Intenta de nuevo.');
+                    break;
                 }
             }
             if (ok) {
@@ -922,7 +959,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 inputTotalBs.value = '';
                 cargarProductosCaja(); 
             } else {
+                // Si hubo un fallo parcial, actualizar catálogo y dejar el carrito para que el usuario lo corrija.
                 alert('Ocurrió un error al registrar una o más ventas. Revise la consola para detalles.');
+                cargarProductosCaja();
             }
         });
     }
