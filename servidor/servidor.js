@@ -1,4 +1,83 @@
+
 // servidor/servidor.js
+// ...existing code...
+// ==================== COMPRAS (ADMIN) ====================
+// POST /api/compras: Registrar una compra (talla opcional)
+app.post('/api/compras', requiereRol('administrador'), async (req, res) => {
+  const { id_proveedor, fecha_compra, estado_pago, total_compra, items } = req.body;
+  if (!id_proveedor || !fecha_compra || !estado_pago || !total_compra || !Array.isArray(items) || items.length === 0) {
+    return res.status(400).json({ ok: false, error: 'Datos incompletos para registrar la compra.' });
+  }
+  let conn;
+  try {
+    conn = await pool.getConnection();
+    await conn.beginTransaction();
+
+    // 1. Insertar compra principal
+    const [compraRes] = await conn.query(
+      'INSERT INTO compras (id_proveedor, fecha_compra, total_compra, estado_pago) VALUES (?, ?, ?, ?)',
+      [id_proveedor, fecha_compra, total_compra, estado_pago]
+    );
+    const id_compra = compraRes.insertId;
+
+    // 2. Insertar items en detallecompra (talla opcional)
+    for (const item of items) {
+      const { idProducto, idTalla, cantidad, costo } = item;
+      if (!idProducto || !cantidad || !costo) {
+        await conn.rollback();
+        conn.release();
+        return res.status(400).json({ ok: false, error: 'Cada item debe tener producto, cantidad y costo.' });
+      }
+      // Si idTalla es null, undefined o vacío, insertar NULL
+      await conn.query(
+        'INSERT INTO detallecompra (id_compra, id_producto, id_talla, cantidad, costo_unitario) VALUES (?, ?, ?, ?, ?)',
+        [id_compra, idProducto, idTalla || null, cantidad, costo]
+      );
+      // Actualizar inventario si corresponde (si hay talla, sumar a inventario por talla; si no, sumar a inventario total)
+      if (idTalla) {
+        // Si existe registro, sumar; si no, crear
+        const [invRows] = await conn.query('SELECT cantidad FROM inventario WHERE id_producto = ? AND id_talla = ? LIMIT 1', [idProducto, idTalla]);
+        if (invRows.length > 0) {
+          await conn.query('UPDATE inventario SET cantidad = cantidad + ? WHERE id_producto = ? AND id_talla = ?', [cantidad, idProducto, idTalla]);
+        } else {
+          await conn.query('INSERT INTO inventario (id_producto, id_talla, cantidad) VALUES (?, ?, ?)', [idProducto, idTalla, cantidad]);
+        }
+      } else {
+        // Sumar a inventario total del producto (columna inventario)
+        await conn.query('UPDATE productos SET inventario = inventario + ? WHERE id_producto = ?', [cantidad, idProducto]);
+      }
+    }
+
+    await conn.commit();
+    conn.release();
+    res.json({ ok: true, id_compra });
+  } catch (e) {
+    if (conn) { try { await conn.rollback(); conn.release(); } catch (_) {} }
+    console.error('Error registrar compra:', e.message || e);
+    res.status(500).json({ ok: false, error: 'Error al registrar compra.' });
+  }
+});
+
+// GET /api/compras: Listar compras
+app.get('/api/compras', requiereRol('administrador'), async (req, res) => {
+  try {
+    const [compras] = await pool.query(
+      `SELECT c.id_compra, c.fecha_compra, c.total_compra, c.estado_pago, p.nombre AS nombre_proveedor
+       FROM compras c
+       LEFT JOIN proveedores p ON c.id_proveedor = p.id_proveedor
+       ORDER BY c.fecha_compra DESC, c.id_compra DESC LIMIT 100`
+    );
+    res.json({ compras });
+  } catch (e) {
+    console.error('Error listar compras:', e.message || e);
+    res.status(500).json({ compras: [] });
+  }
+});
+
+// Documentación de estados de pago:
+// - "Pagada": La compra fue pagada completamente.
+// - "Pendiente": La compra aún no ha sido pagada (debe dinero al proveedor).
+// - "Parcial": Se ha realizado un pago parcial, pero aún queda saldo pendiente con el proveedor.
 const express = require('express');
 const path = require('path');
 let bcrypt;
