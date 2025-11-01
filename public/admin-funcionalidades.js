@@ -66,6 +66,16 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // Reportes
     cargarReporteUtilidad();
+
+    // Selector de temporada para análisis de ventas (si existe en la página)
+    const selTemp = document.getElementById('selectTemporada');
+    if (selTemp) {
+        selTemp.addEventListener('change', function() {
+            fetchVentasTemporada(selTemp.value);
+        });
+        // Cargar inicialmente según la opción seleccionada
+        fetchVentasTemporada(selTemp.value || 'actual');
+    }
 });
 
 // ==================== FUNCIONES DE COMPRAS ====================
@@ -583,6 +593,48 @@ async function cargarReporteUtilidad() {
         }
     } catch (error) {
         console.error('Error cargando reporte:', error);
+    }
+}
+
+// ------------------ Análisis de Ventas por Temporada (frontend helper) ------------------
+async function fetchVentasTemporada(periodo = 'actual') {
+    try {
+        const res = await fetch(`/api/reportes/ventas-temporada?periodo=${encodeURIComponent(periodo)}`);
+        const data = await res.json();
+        if (!data) return;
+
+        // data.rows contiene objetos con ingreso_total (según la vista)
+        // Para compatibilidad con cargarGraficoVentas (que espera {ingreso_total}), pasamos rows directamente
+        if (data.rows && Array.isArray(data.rows)) {
+            // Si la vista devuelve por mes, usamos ingreso_total; si son agrupaciones, también deberían tener ingreso_total
+            cargarGraficoVentas(data.rows.map(r => ({ ingreso_total: Number(r.ingreso_total || 0), label: r.periodo || (r.anio && r.mes ? `${r.anio}-${String(r.mes).padStart(2,'0')}` : '') })));
+        }
+    } catch (e) {
+        console.error('Error obteniendo ventas por temporada:', e);
+    }
+}
+
+// ------------------ Rotación de Inventario (frontend helper) ------------------
+async function fetchRotacionInventario(top = 50) {
+    try {
+        const res = await fetch(`/api/reportes/rotacion-inventario?top=${top}`);
+        const data = await res.json();
+        if (data && data.rows) {
+            // Puedes mostrar estos datos en una tabla o usar otra función para renderizarlos
+            console.log('Rotación inventario top', top, data.rows);
+            // Ejemplo: actualizar un contenedor si existe
+            const cont = document.getElementById('rotacionTabla');
+            if (cont) {
+                cont.innerHTML = data.rows.map(r => `
+                    <div class="item">
+                      <div><strong>${r.nombre}</strong> — ${r.categoria || ''}</div>
+                      <div>Stock: ${r.stock_actual} | Vendidas (últ. mes): ${r.unidades_vendidas_ultimo_mes} | Índice: ${parseFloat(r.indice_rotacion||0).toFixed(2)}</div>
+                    </div>
+                `).join('');
+            }
+        }
+    } catch (e) {
+        console.error('Error al obtener rotación de inventario:', e);
     }
 }
 

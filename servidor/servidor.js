@@ -947,3 +947,53 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Servidor escuchando en http://localhost:${PORT}`);
 });
+
+// ---------------- Reportes: Ventas por Temporada y Rotación de Inventario ----------------
+// Estas rutas usan las vistas definidas en la base de datos: vista_ventas_temporada y vista_rotacion_inventario
+app.get('/api/reportes/ventas-temporada', requiereRol('administrador'), async (req, res) => {
+  try {
+    // periodo puede ser: actual, anterior, trimestre, anual, todos
+    const periodo = req.query.periodo || 'todos';
+    const year = req.query.year ? Number(req.query.year) : null;
+
+    // Si la vista existe, retornamos filas filtradas por año si se solicita
+    let query = 'SELECT anio, mes, trimestre, periodo, ingreso_total, unidades_vendidas FROM vista_ventas_temporada';
+    const params = [];
+    if (year) {
+      query += ' WHERE anio = ?';
+      params.push(year);
+    }
+    query += ' ORDER BY anio DESC, mes DESC LIMIT 48';
+
+    const [rows] = await pool.query(query, params);
+
+    // Si se pidió un tipo de agrupación específico, podemos transformar aquí (por ejemplo, "trimestre")
+    if (periodo === 'trimestre') {
+      // agrupar por año+trimestre
+      const grouped = {};
+      for (const r of rows) {
+        const key = `${r.anio}-T${r.trimestre}`;
+        if (!grouped[key]) grouped[key] = { periodo: key, ingreso_total: 0, unidades_vendidas: 0 };
+        grouped[key].ingreso_total += Number(r.ingreso_total || 0);
+        grouped[key].unidades_vendidas += Number(r.unidades_vendidas || 0);
+      }
+      return res.json({ ok: true, periodo: 'trimestre', rows: Object.values(grouped) });
+    }
+
+    return res.json({ ok: true, periodo, rows });
+  } catch (e) {
+    console.error('Error reportes ventas-temporada:', e.message || e);
+    res.status(500).json({ ok: false, rows: [], message: 'Error al obtener ventas por temporada' });
+  }
+});
+
+app.get('/api/reportes/rotacion-inventario', requiereRol('administrador'), async (req, res) => {
+  try {
+    const top = Math.max(1, Math.min(500, Number(req.query.top) || 100));
+    const [rows] = await pool.query(`SELECT id_producto, nombre, marca, categoria, stock_actual, unidades_vendidas_ultimo_mes, indice_rotacion FROM vista_rotacion_inventario ORDER BY indice_rotacion DESC LIMIT ?`, [top]);
+    return res.json({ ok: true, rows });
+  } catch (e) {
+    console.error('Error reportes rotacion-inventario:', e.message || e);
+    res.status(500).json({ ok: false, rows: [], message: 'Error al obtener rotación de inventario' });
+  }
+});
