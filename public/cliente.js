@@ -752,15 +752,20 @@ document.addEventListener('DOMContentLoaded', () => {
                 const data = await res.json();
                 if (data.tasa) tasa = parseFloat(data.tasa);
             } catch {}
+            // Precio unitario en Bs y total en Bs
+            const precioUnitBs = precio * tasa;
+            if (document.getElementById('ventaPrecioUnitarioBs')) {
+                document.getElementById('ventaPrecioUnitarioBs').value = precioUnitBs ? precioUnitBs.toFixed(2) : '';
+            }
             totalBs.value = (total * tasa).toFixed(2);
         }
         precioUnitario.addEventListener('input', actualizarTotales);
         cantidad.addEventListener('input', actualizarTotales);
 
-        // Cargar productos disponibles en el select
+        // Cargar productos disponibles en el select (CAJA) -> usar endpoint público /api/productos
         async function cargarProductosCaja() {
             try {
-                const res = await fetch('/api/admin/productos');
+                const res = await fetch('/api/productos');
                 const data = await res.json();
                 productosDisponibles = data.productos || [];
                 selectProducto.innerHTML = '<option value="">Selecciona producto</option>';
@@ -771,30 +776,40 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         cargarProductosCaja();
 
-        // Al cambiar el producto, actualizar el precio unitario
-        selectProducto.addEventListener('change', () => {
+        // Al cambiar el producto, actualizar el precio unitario y cargar tallas disponibles
+        selectProducto.addEventListener('change', async () => {
             const option = selectProducto.selectedOptions[0];
             if (option) {
                 const precio = option.getAttribute('data-precio');
                 inputPrecioUnitario.value = precio;
-                // Actualizar tallas disponibles según el producto
+                await actualizarTotales();
+                // Actualizar tallas disponibles según el producto (usa endpoint caja público)
                 const idProd = option.value;
                 cargarTallasPorProducto(idProd);
             } else {
                 inputPrecioUnitario.value = '';
+                document.getElementById('ventaPrecioUnitarioBs').value = '';
                 selectTalla.innerHTML = '<option value="">Selecciona talla</option>';
             }
         });
 
-        // Cargar tallas disponibles para el producto seleccionado
+        // Cargar tallas disponibles para el producto seleccionado usando GET /api/productos/:id (público para caja)
         async function cargarTallasPorProducto(idProducto) {
-            const res = await fetch(`/api/productos/${idProducto}`);
-            const data = await res.json();
-            const tallas = data.producto ? data.producto.tallas : [];
-            selectTalla.innerHTML = '<option value="">Selecciona talla</option>';
-            tallas.forEach(talla => {
-                selectTalla.innerHTML += `<option value="${talla.id_talla}" data-cantidad="${talla.cantidad}">${talla.nombre} (${talla.cantidad} disponibles)</option>`;
-            });
+            if (!idProducto) {
+                selectTalla.innerHTML = '<option value="">Selecciona talla</option>';
+                return;
+            }
+            try {
+                const res = await fetch(`/api/productos/${encodeURIComponent(idProducto)}`);
+                const data = await res.json();
+                const tallas = data.producto ? data.producto.tallas : [];
+                selectTalla.innerHTML = '<option value="">Selecciona talla</option>';
+                tallas.forEach(talla => {
+                    selectTalla.innerHTML += `<option value="${talla.id_talla}" data-cantidad="${talla.cantidad}">${talla.nombre} (${talla.cantidad} disponibles)</option>`;
+                });
+            } catch (e) {
+                selectTalla.innerHTML = '<option value="">Error al cargar tallas</option>';
+            }
         }
 
         btnAgregarProducto.addEventListener('click', () => {
@@ -804,23 +819,32 @@ document.addEventListener('DOMContentLoaded', () => {
             const optProd = selectProducto.selectedOptions[0];
             const nombreProd = optProd ? optProd.getAttribute('data-nombre') : '';
             const marcaProd = optProd ? optProd.getAttribute('data-marca') : '';
-            const nombreTalla = optTalla ? optTalla.textContent.match(/(.*)\s\(/)[1].trim() : ''; // Obtiene solo el nombre de la talla
-            const cantidad = parseInt(inputCantidad.value) || 0;
+            const nombreTalla = optTalla ? optTalla.textContent.replace(/\s*\(\d+\s+disponibles\)/, '').trim() : '';
+            const cantidadVal = parseInt(inputCantidad.value) || 0;
             const maxCant = optTalla ? parseInt(optTalla.getAttribute('data-cantidad')) : 0;
             const precio = parseFloat(inputPrecioUnitario.value) || 0;
             
-            if (!idProd || !idTalla || cantidad < 1 || cantidad > maxCant) {
-                alert('Completa todos los campos y verifica la cantidad disponible.');
+            if (!idProd || !idTalla) {
+                alert('Selecciona producto y talla.');
+                return;
+            }
+            if (cantidadVal < 1) {
+                alert('Ingresa una cantidad válida.');
+                return;
+            }
+            if (cantidadVal > maxCant) {
+                alert(`Cantidad solicitada (${cantidadVal}) supera el stock disponible (${maxCant}).`);
                 return;
             }
             // Incluir idProd e idTalla en el carrito
-            carrito.push({ idProd, nombreProd, marcaProd, idTalla, nombreTalla, cantidad, precio });
+            carrito.push({ idProd, nombreProd, marcaProd, idTalla, nombreTalla, cantidad: cantidadVal, precio });
             renderCarrito();
             // Limpiar campos
             selectProducto.value = '';
             selectTalla.innerHTML = '<option value="">Selecciona talla</option>';
             inputCantidad.value = '';
             inputPrecioUnitario.value = '';
+            if (document.getElementById('ventaPrecioUnitarioBs')) document.getElementById('ventaPrecioUnitarioBs').value = '';
             inputTotalDolar.value = '';
             inputTotalBs.value = '';
         });
@@ -860,29 +884,29 @@ document.addEventListener('DOMContentLoaded', () => {
             
             let ok = true;
             for (const item of carrito) {
-                // CORRECCIÓN 4: Enviar id_producto e id_talla al backend para una gestión de inventario precisa
                 const body = {
                     cliente_nombre,
                     cliente_cedula,
                     cliente_telefono,
                     cliente_email,
-                    id_producto: item.idProd, // Usar ID del producto
-                    id_talla: item.idTalla,   // Usar ID de la talla
+                    id_producto: item.idProd,
+                    id_talla: item.idTalla,
                     cantidad: item.cantidad,
                     precio_unitario: item.precio,
-                    // Se deja total_dolar y total_bs para el backend, solo enviando los datos de la transacción
                     tipo_pago
                 };
                 try {
                     const res = await fetch('/api/ventas', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(body)
+                        body: JSON.stringify(body),
+                        credentials: 'include'
                     });
                     const data = await res.json();
                     if (!data.ok) {
                         ok = false;
-                        console.error('Error al registrar venta de producto:', item.nombreProd, data.error);
+                        console.error('Error al registrar venta de producto:', item.nombreProd, data.message || data.error);
+                        alert('Error en venta: ' + (data.message || data.error || 'Revise la consola.'));
                     }
                 } catch (e) { 
                     ok = false; 
@@ -896,7 +920,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 formVentaCaja.reset();
                 inputTotalDolar.value = '';
                 inputTotalBs.value = '';
-                // Recargar productos para reflejar el nuevo stock
                 cargarProductosCaja(); 
             } else {
                 alert('Ocurrió un error al registrar una o más ventas. Revise la consola para detalles.');

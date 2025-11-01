@@ -92,7 +92,7 @@ app.delete('/api/categorias/:id', requiereRol('administrador'), async (req, res)
       return res.status(400).json({ success: false, message: `No se puede eliminar: ${total} producto(s) usan esta categoría` });
     }
   const [delRes] = await pool.query('DELETE FROM categorias WHERE id_categoria = ?', [id]);
-    if (delRes.affectedRows > 0) return res.json({ success: true });
+    if (delRes.affectedRows > 0) return res.json({ ok: true, success: true });
     return res.status(404).json({ success: false, message: 'Categoría no encontrada' });
   } catch (e) {
     console.error('Error eliminar categoria:', e.message);
@@ -143,7 +143,7 @@ app.delete('/api/proveedores/:id', requiereRol('administrador'), async (req, res
       return res.status(400).json({ success: false, message: `No se puede eliminar: ${total} producto(s) usan este proveedor` });
     }
   const [delRes] = await pool.query('DELETE FROM proveedores WHERE id_proveedor = ?', [id]);
-    if (delRes.affectedRows > 0) return res.json({ success: true });
+    if (delRes.affectedRows > 0) return res.json({ ok: true, success: true });
     return res.status(404).json({ success: false, message: 'Proveedor no encontrado' });
   } catch (e) {
     console.error('Error eliminar proveedor:', e.message);
@@ -193,7 +193,7 @@ app.delete('/api/tallas/:id', requiereRol('administrador'), async (req, res) => 
       return res.status(400).json({ success: false, message: `No se puede eliminar: ${total} registro(s) en inventario usan esta talla` });
     }
   const [delRes] = await pool.query('DELETE FROM tallas WHERE id_talla = ?', [id]);
-    if (delRes.affectedRows > 0) return res.json({ success: true });
+    if (delRes.affectedRows > 0) return res.json({ ok: true, success: true });
     return res.status(404).json({ success: false, message: 'Talla no encontrada' });
   } catch (e) {
     console.error('Error eliminar talla:', e.message);
@@ -315,10 +315,12 @@ app.put('/api/admin/productos/:id', requiereRol('administrador'), async (req, re
 app.delete('/api/admin/productos/:id', requiereRol('administrador'), async (req, res) => {
   const id = req.params.id;
   try {
-  await pool.query('DELETE FROM productos WHERE id_producto = ?', [id]);
-    res.json({ ok: true });
+    const [delRes] = await pool.query('DELETE FROM productos WHERE id_producto = ?', [id]);
+    if (delRes.affectedRows > 0) return res.json({ ok: true, success: true });
+    return res.status(404).json({ ok: false, success: false, message: 'Producto no encontrado' });
   } catch (e) {
-    res.json({ ok: false });
+    console.error('Error eliminar producto admin:', e.message);
+    res.status(500).json({ ok: false, success: false, message: 'Error del servidor al eliminar producto' });
   }
 });
 app.get('/api/admin/productos', requiereRol('administrador'), async (req, res) => {
@@ -457,6 +459,169 @@ app.get('/api/generar-hash/:password', async (req, res) => {
     res.send({ password: req.params.password, hash: hash, nota: 'Usar este hash en phpMyAdmin para crear el usuario' });
   } catch (e) {
     res.status(500).json({ error: 'Error al generar hash' });
+  }
+});
+
+// ---------------- Rutas públicas para Productos (CAJA y front) ----------------
+// Listado de productos (para Caja) -> incluye tallas y cantidades
+app.get('/api/productos', requiereRol('cualquiera'), async (req, res) => {
+  try {
+    const [rows] = await pool.query('SELECT id_producto, nombre, marca, inventario, precio_venta FROM productos LIMIT 500');
+    // Obtener tallas por producto
+    for (const prod of rows) {
+      const [tallas] = await pool.query(
+        'SELECT inventario.id_talla, tallas.nombre, inventario.cantidad FROM inventario JOIN tallas ON inventario.id_talla = tallas.id_talla WHERE inventario.id_producto = ?',
+        [prod.id_producto]
+      );
+      prod.tallas = tallas.map(t => ({ id_talla: t.id_talla, nombre: t.nombre, cantidad: t.cantidad }));
+    }
+    res.json({ productos: rows });
+  } catch (e) {
+    console.error('Error listar productos publico:', e.message);
+    res.status(500).json({ productos: [] });
+  }
+});
+
+// Obtener producto por id (para Caja)
+app.get('/api/productos/:id', requiereRol('cualquiera'), async (req, res) => {
+  const id = req.params.id;
+  try {
+    const [rows] = await pool.query('SELECT id_producto, nombre, marca, inventario, precio_venta FROM productos WHERE id_producto = ? LIMIT 1', [id]);
+    if (rows.length === 0) return res.json({ producto: null });
+    const prod = rows[0];
+    const [tallas] = await pool.query(
+      'SELECT inventario.id_talla, tallas.nombre, inventario.cantidad FROM inventario JOIN tallas ON inventario.id_talla = tallas.id_talla WHERE inventario.id_producto = ?',
+      [prod.id_producto]
+    );
+    prod.tallas = tallas.map(t => ({ id_talla: t.id_talla, nombre: t.nombre, cantidad: t.cantidad }));
+    res.json({ producto: prod });
+  } catch (e) {
+    console.error('Error obtener producto publico:', e.message);
+    res.status(500).json({ producto: null });
+  }
+});
+
+// ---------------- Endpoint para tasa BCV con cache y fallback ----------------
+let _cachedTasa = null;
+let _cachedTasaTs = 0;
+const TASA_CACHE_MS = 1000 * 60 * 5; // 5 minutos
+const fetch = require('node-fetch');
+
+app.get('/api/tasa-bcv', async (req, res) => {
+  const now = Date.now();
+  if (_cachedTasa && (now - _cachedTasaTs) < TASA_CACHE_MS) {
+    return res.json({ tasa: _cachedTasa, source: 'cache' });
+  }
+  try {
+    // Intentar obtener desde URL configurada (ej: BCV real si la proporcionas)
+    if (process.env.BCV_API_URL) {
+      const resp = await fetch(process.env.BCV_API_URL, { timeout: 5000 });
+      const json = await resp.json();
+      // Se asume que la respuesta tiene un campo 'tasa' o 'valor' según la API real.
+      const tasaFromApi = json.tasa || json.valor || json.USD || (json.data && json.data.USD);
+      const tasa = parseFloat(tasaFromApi);
+      if (!isNaN(tasa) && tasa > 0) {
+        _cachedTasa = tasa;
+        _cachedTasaTs = Date.now();
+        return res.json({ tasa: _cachedTasa, source: 'BCV_API_URL' });
+      }
+    }
+    // Fallback: intentar fuente pública (ej. DolarToday JSON como fallback)
+    try {
+      const resp2 = await fetch('https://s3.amazonaws.com/dolartoday/data.json', { timeout: 5000 });
+      const json2 = await resp2.json();
+      const tasaDt = json2 && json2.USD && (json2.USD.transferencia || json2.USD.promedio) || json2.USD && json2.USD.sicad2;
+      const tasa = parseFloat(tasaDt);
+      if (!isNaN(tasa) && tasa > 0) {
+        _cachedTasa = tasa;
+        _cachedTasaTs = Date.now();
+        return res.json({ tasa: _cachedTasa, source: 'dtd-fallback' });
+      }
+    } catch (e) {
+      // no hay fallback exitoso
+    }
+    // Último recurso: valor fijo (fallback)
+    _cachedTasa = 36;
+    _cachedTasaTs = Date.now();
+    return res.json({ tasa: _cachedTasa, source: 'fallback' });
+  } catch (e) {
+    console.error('Error obtener tasa BCV:', e.message);
+    _cachedTasa = 36;
+    _cachedTasaTs = Date.now();
+    res.json({ tasa: _cachedTasa, source: 'error-fallback' });
+  }
+});
+
+// ---------------- Ventas: validar stock y actualizar inventario ----------------
+// Ajustar para aceptar id_producto e id_talla (requerido) y decrementar inventario
+app.post('/api/ventas', requiereRol('caja'), async (req, res) => {
+  const {
+    cliente_nombre, cliente_cedula, cliente_telefono, cliente_email,
+    id_producto, id_talla, cantidad, precio_unitario, tipo_pago
+  } = req.body;
+
+  if (!id_producto || !id_talla || !cantidad || cantidad <= 0) {
+    return res.status(400).json({ ok: false, message: 'Faltan id_producto, id_talla o cantidad válida.' });
+  }
+
+  try {
+    // 1. Verificar stock en inventario
+    const [invRows] = await pool.query('SELECT cantidad FROM inventario WHERE id_producto = ? AND id_talla = ? LIMIT 1', [id_producto, id_talla]);
+    if (invRows.length === 0) {
+      return res.status(400).json({ ok: false, message: 'No hay inventario para ese producto/talla.' });
+    }
+    const disponible = invRows[0].cantidad || 0;
+    if (disponible < cantidad) {
+      return res.status(400).json({ ok: false, message: `Stock insuficiente. Disponible: ${disponible}` });
+    }
+
+    // 2. Buscar o crear cliente
+    let id_cliente = null;
+    const [cliRows] = await pool.query('SELECT id_cliente FROM clientes WHERE cedula = ? LIMIT 1', [cliente_cedula]);
+    if (cliRows.length > 0) {
+      id_cliente = cliRows[0].id_cliente;
+    } else {
+      const [cliRes] = await pool.query('INSERT INTO clientes (nombre, cedula, telefono, email) VALUES (?, ?, ?, ?)', [cliente_nombre, cliente_cedula, cliente_telefono || '', cliente_email || '']);
+      id_cliente = cliRes.insertId;
+    }
+
+    // 3. Registrar venta principal
+    const total_dolar = (precio_unitario || 0) * cantidad;
+    const [ventaRes] = await pool.query('INSERT INTO ventas (fecha_hora, total_venta, tipo_pago, id_usuario, id_cliente) VALUES (NOW(), ?, ?, ?, ?)', [total_dolar, tipo_pago || 'Efectivo', req.session.user.id, id_cliente]);
+    const id_venta = ventaRes.insertId;
+
+    // 4. Registrar detalleventa y actualizar inventario
+    await pool.query('INSERT INTO detalleventa (id_venta, id_producto, id_talla, cantidad, precio_unitario) VALUES (?, ?, ?, ?, ?)', [id_venta, id_producto, id_talla, cantidad, precio_unitario || 0]);
+    // actualizar inventario por talla
+    await pool.query('UPDATE inventario SET cantidad = cantidad - ? WHERE id_producto = ? AND id_talla = ?', [cantidad, id_producto, id_talla]);
+    // actualizar stock total en productos (si existe columna inventario)
+    await pool.query('UPDATE productos SET inventario = GREATEST(0, inventario - ?) WHERE id_producto = ?', [cantidad, id_producto]);
+
+    res.json({ ok: true, id_venta });
+  } catch (e) {
+    console.error('Error al registrar venta:', e.message);
+    res.status(500).json({ ok: false, message: 'Error al registrar venta' });
+  }
+});
+
+// ---------------- Ajuste de respuestas en eliminaciones (estandarizar ok / success) ----------------
+// Reescribir / ajustar los deletes existentes para devolver { ok: true, success: true } en caso de éxito
+// ...existing delete routes...
+// (Modifica las rutas existentes ya definidas más arriba: categorías, proveedores, tallas, productos admin)
+// Asegurarse de responder con ok y success para compatibilidad con admin.html
+// Ejemplo: reemplazar 'return res.json({ success: true });' con 'return res.json({ ok: true, success: true });'
+// ...existing code...
+// Para mantener el patch compacto no repetimos todo el código: sustituir las respuestas en cada delete (categorias, proveedores, tallas, productos) como se indicó arriba.
+// ...existing code...
+app.delete('/api/admin/productos/:id', requiereRol('administrador'), async (req, res) => {
+  const id = req.params.id;
+  try {
+    const [delRes] = await pool.query('DELETE FROM productos WHERE id_producto = ?', [id]);
+    if (delRes.affectedRows > 0) return res.json({ ok: true, success: true });
+    return res.status(404).json({ ok: false, success: false, message: 'Producto no encontrado' });
+  } catch (e) {
+    console.error('Error eliminar producto admin:', e.message);
+    res.status(500).json({ ok: false, success: false, message: 'Error del servidor al eliminar producto' });
   }
 });
 
