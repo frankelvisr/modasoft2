@@ -109,19 +109,19 @@ async function cargarProductosCompra() {
 
 function agregarItemCompra() {
     const idProducto = document.getElementById('compraProducto').value;
-    const idTalla = document.getElementById('compraTalla').value;
+    const idTalla = document.getElementById('compraTalla') ? document.getElementById('compraTalla').value : '';
     const cantidad = parseInt(document.getElementById('compraCantidad').value);
     const costo = parseFloat(document.getElementById('compraCosto').value);
 
-    if (!idProducto || !idTalla || !cantidad || !costo) {
-        alert('Completa todos los campos');
+    // Solo validar producto, cantidad y costo (talla es opcional)
+    if (!idProducto || !cantidad || !costo) {
+        alert('Completa todos los campos obligatorios (producto, cantidad y costo)');
         return;
     }
 
-    itemsCompra.push({ idProducto, idTalla, cantidad, costo });
+    itemsCompra.push({ idProducto, idTalla: idTalla || null, cantidad, costo });
     renderItemsCompra();
     calcularTotalCompra();
-    
     // Limpiar campos
     document.getElementById('compraCantidad').value = '';
     document.getElementById('compraCosto').value = '';
@@ -130,18 +130,19 @@ function agregarItemCompra() {
 function renderItemsCompra() {
     const contenedor = document.getElementById('compraItems');
     if (!contenedor) return;
-    
     if (itemsCompra.length === 0) {
         contenedor.innerHTML = '<div class="item">Agrega productos a la compra</div>';
         return;
     }
-
-    contenedor.innerHTML = itemsCompra.map((item, idx) => `
+    contenedor.innerHTML = itemsCompra.map((item, idx) => {
+        const tallaTxt = item.idTalla && item.idTalla !== 'null' && item.idTalla !== '' ? `- Talla ${item.idTalla}` : '';
+        return `
         <div class="item">
-            <span>Producto ${item.idProducto} - Talla ${item.idTalla} - ${item.cantidad} unidades - $${item.costo.toFixed(2)} c/u</span>
+            <span>Producto ${item.idProducto} ${tallaTxt} - ${item.cantidad} unidades - $${item.costo.toFixed(2)} c/u</span>
             <button class="btn btn-small secondary" onclick="eliminarItemCompra(${idx})">Eliminar</button>
         </div>
-    `).join('');
+        `;
+    }).join('');
 }
 
 window.eliminarItemCompra = function(index) {
