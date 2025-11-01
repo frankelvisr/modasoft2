@@ -314,13 +314,42 @@ app.put('/api/admin/productos/:id', requiereRol('administrador'), async (req, re
 // Eliminar producto (DELETE)
 app.delete('/api/admin/productos/:id', requiereRol('administrador'), async (req, res) => {
   const id = req.params.id;
+  let conn;
   try {
-    const [delRes] = await pool.query('DELETE FROM productos WHERE id_producto = ?', [id]);
-    if (delRes.affectedRows > 0) return res.json({ ok: true, success: true });
-    return res.status(404).json({ ok: false, success: false, message: 'Producto no encontrado' });
+    // Obtener conexión y comenzar transacción
+    conn = await pool.getConnection();
+    await conn.beginTransaction();
+
+    // 1) Verificar si el producto tiene registros en detalleventa -> si tiene ventas, NO eliminar
+    const [detCountRows] = await conn.query('SELECT COUNT(*) as total FROM detalleventa WHERE id_producto = ?', [id]);
+    const detTotal = (Array.isArray(detCountRows) && detCountRows[0]) ? detCountRows[0].total : (detCountRows.total || 0);
+    if (detTotal > 0) {
+      await conn.rollback();
+      conn.release();
+      return res.status(400).json({ ok: false, success: false, message: `No se puede eliminar: el producto tiene ${detTotal} venta(s) registrada(s)` });
+    }
+
+    // 2) Eliminar filas relacionadas en inventario (si existen)
+    await conn.query('DELETE FROM inventario WHERE id_producto = ?', [id]);
+
+    // 3) Eliminar el producto
+    const [delRes] = await conn.query('DELETE FROM productos WHERE id_producto = ?', [id]);
+    if (delRes.affectedRows === 0) {
+      await conn.rollback();
+      conn.release();
+      return res.status(404).json({ ok: false, success: false, message: 'Producto no encontrado' });
+    }
+
+    // Commit y liberar
+    await conn.commit();
+    conn.release();
+    return res.json({ ok: true, success: true });
   } catch (e) {
-    console.error('Error eliminar producto admin:', e.message);
-    res.status(500).json({ ok: false, success: false, message: 'Error del servidor al eliminar producto' });
+    if (conn) {
+      try { await conn.rollback(); conn.release(); } catch (_) {}
+    }
+    console.error('Error eliminar producto admin (transaction):', e.message || e);
+    return res.status(500).json({ ok: false, success: false, message: 'Error del servidor al eliminar producto' });
   }
 });
 app.get('/api/admin/productos', requiereRol('administrador'), async (req, res) => {
@@ -386,31 +415,45 @@ app.get('/api/clientes/buscar', requiereRol('caja'), async (req, res) => {
 // Nuevo endpoint: Registro de ventas completo (usado por caja.html)
 app.post('/api/ventas', requiereRol('caja'), async (req, res) => {
   const { cliente_nombre, cliente_cedula, cliente_telefono, cliente_email, marca, talla, cantidad, precio_unitario, total_dolar, total_bs, tipo_pago } = req.body;
+
+  // Validación de datos requeridos para el cálculo
+  const cantidadNum = Number(cantidad);
+  const precioNum = Number(precio_unitario);
+  let totalVenta = Number(total_dolar);
+  if (isNaN(totalVenta) || totalVenta === 0) {
+    // Si no viene total_dolar, lo calculamos
+    if (!isNaN(precioNum) && !isNaN(cantidadNum)) {
+      totalVenta = precioNum * cantidadNum;
+    }
+  }
+  if (!cliente_nombre || !cliente_cedula || isNaN(totalVenta) || totalVenta <= 0) {
+    return res.status(400).json({ ok: false, message: 'Datos de venta incompletos o inválidos.' });
+  }
   try {
     // 1. Buscar o crear cliente
     let id_cliente = null;
-  const [cliRows] = await pool.query('SELECT id_cliente FROM clientes WHERE cedula = ?', [cliente_cedula]);
+    const [cliRows] = await pool.query('SELECT id_cliente FROM clientes WHERE cedula = ?', [cliente_cedula]);
     if (cliRows.length > 0) {
       id_cliente = cliRows[0].id_cliente;
     } else {
-  const [cliRes] = await pool.query('INSERT INTO clientes (nombre, cedula, telefono, email) VALUES (?, ?, ?, ?)', [cliente_nombre, cliente_cedula, cliente_telefono || '', cliente_email || '']);
+      const [cliRes] = await pool.query('INSERT INTO clientes (nombre, cedula, telefono, email) VALUES (?, ?, ?, ?)', [cliente_nombre, cliente_cedula, cliente_telefono || '', cliente_email || '']);
       id_cliente = cliRes.insertId;
     }
     // 2. Registrar venta principal
     const [ventaRes] = await pool.query(
       'INSERT INTO ventas (fecha_hora, total_venta, tipo_pago, id_usuario, id_cliente) VALUES (NOW(), ?, ?, ?, ?)',
-      [total_dolar, tipo_pago, req.session.user.id, id_cliente]
+      [totalVenta, tipo_pago || 'Efectivo', req.session.user.id, id_cliente]
     );
     const id_venta = ventaRes.insertId;
     // 3. Registrar detalle de venta
     // Buscar id_producto por marca (simplificado)
-  const [prodRows] = await pool.query('SELECT id_producto FROM productos WHERE marca = ? LIMIT 1', [marca]);
+    const [prodRows] = await pool.query('SELECT id_producto FROM productos WHERE marca = ? LIMIT 1', [marca]);
     let id_producto = prodRows.length > 0 ? prodRows[0].id_producto : null;
-  // Buscar id_talla
-  const [tallaRows] = await pool.query('SELECT id_talla FROM tallas WHERE nombre = ?', [talla]);
-  let id_talla = tallaRows.length > 0 ? tallaRows[0].id_talla : null;
+    // Buscar id_talla
+    const [tallaRows] = await pool.query('SELECT id_talla FROM tallas WHERE nombre = ?', [talla]);
+    let id_talla = tallaRows.length > 0 ? tallaRows[0].id_talla : null;
     if (id_producto && id_talla) {
-  await pool.query('INSERT INTO detalleventa (id_venta, id_producto, id_talla, cantidad, precio_unitario) VALUES (?, ?, ?, ?, ?)', [id_venta, id_producto, id_talla, cantidad, precio_unitario]);
+      await pool.query('INSERT INTO detalleventa (id_venta, id_producto, id_talla, cantidad, precio_unitario) VALUES (?, ?, ?, ?, ?)', [id_venta, id_producto, id_talla, cantidadNum, precioNum]);
     }
     res.json({ ok: true, id_venta });
   } catch (e) {
@@ -604,6 +647,68 @@ app.post('/api/ventas', requiereRol('caja'), async (req, res) => {
   }
 });
 
+// Endpoint administrativo: listar ventas por mes (con detalle y totales diarios)
+app.get('/api/admin/ventas', requiereRol('administrador'), async (req, res) => {
+  try {
+    const year = Number(req.query.year) || new Date().getFullYear();
+    const month = Number(req.query.month) || (new Date().getMonth() + 1); // 1-12
+
+    // Rango inicio/fin para el mes
+    const start = new Date(year, month - 1, 1);
+    const end = new Date(year, month, 1); // inicio del siguiente mes
+
+    const startStr = `${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2, '0')}-01 00:00:00`;
+    const endStr = `${end.getFullYear()}-${String(end.getMonth() + 1).padStart(2, '0')}-01 00:00:00`;
+
+    // 1) Obtener ventas en el rango
+    const [ventasRows] = await pool.query(
+      `SELECT v.id_venta, v.fecha_hora, v.total_venta, v.tipo_pago, u.usuario AS usuario, c.nombre AS cliente
+       FROM ventas v
+       LEFT JOIN usuarios u ON v.id_usuario = u.id_usuario
+       LEFT JOIN clientes c ON v.id_cliente = c.id_cliente
+       WHERE v.fecha_hora >= ? AND v.fecha_hora < ?
+       ORDER BY v.fecha_hora DESC
+      `,
+      [startStr, endStr]
+    );
+
+    // 2) Obtener detalle para cada venta (optimizable, pero suficiente para volúmenes moderados)
+    for (const v of ventasRows) {
+      const [det] = await pool.query(
+        `SELECT d.id_detalleventa, d.id_producto, p.marca, p.nombre AS producto, d.id_talla, t.nombre AS talla, d.cantidad, d.precio_unitario
+         FROM detalleventa d
+         LEFT JOIN productos p ON d.id_producto = p.id_producto
+         LEFT JOIN tallas t ON d.id_talla = t.id_talla
+         WHERE d.id_venta = ?`,
+        [v.id_venta]
+      );
+      v.detalle = det;
+    }
+
+    // 3) Totales del mes
+    const [tot] = await pool.query(
+      `SELECT IFNULL(SUM(total_venta),0) AS total_mes, COUNT(*) AS ventas_count FROM ventas WHERE fecha_hora >= ? AND fecha_hora < ?`,
+      [startStr, endStr]
+    );
+    const total_mes = (Array.isArray(tot) && tot[0]) ? tot[0].total_mes : (tot.total_mes || 0);
+
+    // 4) Totales por día (para gráficas)
+    const [porDia] = await pool.query(
+      `SELECT DATE(fecha_hora) AS dia, SUM(total_venta) AS total, COUNT(*) AS ventas
+       FROM ventas
+       WHERE fecha_hora >= ? AND fecha_hora < ?
+       GROUP BY DATE(fecha_hora)
+       ORDER BY DATE(fecha_hora) ASC`,
+      [startStr, endStr]
+    );
+
+    res.json({ ok: true, ventas: ventasRows, totales: { total_mes: Number(total_mes), count: tot[0] ? tot[0].ventas_count : 0 }, por_dia: porDia, year, month });
+  } catch (e) {
+    console.error('Error listar ventas admin:', e.message || e);
+    res.status(500).json({ ok: false, ventas: [], message: 'Error al consultar ventas' });
+  }
+});
+
 // ---------------- Ajuste de respuestas en eliminaciones (estandarizar ok / success) ----------------
 // Reescribir / ajustar los deletes existentes para devolver { ok: true, success: true } en caso de éxito
 // ...existing delete routes...
@@ -615,13 +720,42 @@ app.post('/api/ventas', requiereRol('caja'), async (req, res) => {
 // ...existing code...
 app.delete('/api/admin/productos/:id', requiereRol('administrador'), async (req, res) => {
   const id = req.params.id;
+  let conn;
   try {
-    const [delRes] = await pool.query('DELETE FROM productos WHERE id_producto = ?', [id]);
-    if (delRes.affectedRows > 0) return res.json({ ok: true, success: true });
-    return res.status(404).json({ ok: false, success: false, message: 'Producto no encontrado' });
+    // Obtener conexión y comenzar transacción
+    conn = await pool.getConnection();
+    await conn.beginTransaction();
+
+    // 1) Verificar si el producto tiene registros en detalleventa -> si tiene ventas, NO eliminar
+    const [detCountRows] = await conn.query('SELECT COUNT(*) as total FROM detalleventa WHERE id_producto = ?', [id]);
+    const detTotal = (Array.isArray(detCountRows) && detCountRows[0]) ? detCountRows[0].total : (detCountRows.total || 0);
+    if (detTotal > 0) {
+      await conn.rollback();
+      conn.release();
+      return res.status(400).json({ ok: false, success: false, message: `No se puede eliminar: el producto tiene ${detTotal} venta(s) registrada(s)` });
+    }
+
+    // 2) Eliminar filas relacionadas en inventario (si existen)
+    await conn.query('DELETE FROM inventario WHERE id_producto = ?', [id]);
+
+    // 3) Eliminar el producto
+    const [delRes] = await conn.query('DELETE FROM productos WHERE id_producto = ?', [id]);
+    if (delRes.affectedRows === 0) {
+      await conn.rollback();
+      conn.release();
+      return res.status(404).json({ ok: false, success: false, message: 'Producto no encontrado' });
+    }
+
+    // Commit y liberar
+    await conn.commit();
+    conn.release();
+    return res.json({ ok: true, success: true });
   } catch (e) {
-    console.error('Error eliminar producto admin:', e.message);
-    res.status(500).json({ ok: false, success: false, message: 'Error del servidor al eliminar producto' });
+    if (conn) {
+      try { await conn.rollback(); conn.release(); } catch (_) {}
+    }
+    console.error('Error eliminar producto admin (transaction):', e.message || e);
+    return res.status(500).json({ ok: false, success: false, message: 'Error del servidor al eliminar producto' });
   }
 });
 

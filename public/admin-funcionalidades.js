@@ -11,6 +11,20 @@
 let itemsCompra = [];
 
 document.addEventListener('DOMContentLoaded', function() {
+        // Cargar ventas del mes en el panel de Ventas (administrador)
+        if (document.getElementById('listaVentasAdmin')) {
+            cargarVentasAdmin();
+            const inputBuscarVentas = document.getElementById('buscarVentaAdmin');
+            if (inputBuscarVentas) {
+                let t;
+                inputBuscarVentas.addEventListener('input', function(e) {
+                    clearTimeout(t);
+                    t = setTimeout(() => {
+                        cargarVentasAdmin(e.target.value.trim());
+                    }, 350);
+                });
+            }
+        }
     // Cargar productos y proveedores para compras
     if (document.getElementById('compraProveedor')) {
         cargarProveedoresCompra();
@@ -332,6 +346,65 @@ async function cargarIngresos() {
         console.error('Error cargando ingresos:', error);
     }
 }
+
+// ==================== FUNCIONES DE VENTAS (ADMIN) ====================
+async function cargarVentasAdmin(busqueda = '') {
+    try {
+        // Por ahora tomamos mes/año actuales; se pueden exponer filtros en UI
+        const now = new Date();
+        const year = now.getFullYear();
+        const month = now.getMonth() + 1;
+        const res = await fetch(`/api/admin/ventas?year=${year}&month=${month}`);
+        const data = await res.json();
+        const lista = document.getElementById('listaVentasAdmin');
+        if (!lista) return;
+
+        if (!data.ok) {
+            lista.innerHTML = `<div class="item">Error cargando ventas: ${data.message || 'error'}</div>`;
+            return;
+        }
+
+        let ventas = data.ventas || [];
+        if (busqueda) {
+            const b = busqueda.toLowerCase();
+            ventas = ventas.filter(v => (v.cliente || '').toLowerCase().includes(b) || (v.usuario || '').toLowerCase().includes(b) || String(v.id_venta).includes(b));
+        }
+
+        if (ventas.length === 0) {
+            lista.innerHTML = '<div class="item">No hay ventas para el mes seleccionado.</div>';
+            return;
+        }
+
+        lista.innerHTML = ventas.map(v => `
+            <div class="item" data-id="${v.id_venta}">
+                <div>
+                    <strong>Venta #${v.id_venta}</strong> — ${v.cliente || 'Cliente Anónimo'}<br>
+                    Fecha: ${v.fecha_hora} | Total: $${parseFloat(v.total_venta || 0).toFixed(2)} | Pago: ${v.tipo_pago} | Usuario: ${v.usuario || 'N/A'}
+                    <div style="margin-top:8px;font-size:0.9em;color:var(--text-muted);">${(v.detalle || []).map(d => `${d.marca || ''} ${d.producto || ''} (${d.talla || ''}) x${d.cantidad} @ $${parseFloat(d.precio_unitario||0).toFixed(2)}`).join(' · ')}</div>
+                </div>
+                <div class="actions">
+                    <button class="btn btn-small" onclick="verDetalleVenta(${v.id_venta})">Ver</button>
+                </div>
+            </div>
+        `).join('');
+
+        // Mostrar totales resumidos (si existe contenedor en dashboard)
+        if (document.getElementById('ventasMes')) {
+            document.getElementById('ventasMes').textContent = '$' + (data.totales && data.totales.total_mes ? parseFloat(data.totales.total_mes).toFixed(2) : '0.00');
+        }
+
+    } catch (error) {
+        console.error('Error cargando ventas admin:', error);
+        const lista = document.getElementById('listaVentasAdmin');
+        if (lista) lista.innerHTML = '<div class="item">Error de conexión al cargar ventas</div>';
+    }
+}
+
+window.verDetalleVenta = function(id) {
+    // Simple scroll a la venta o abrir modal: por ahora mostramos alerta con detalles
+    alert('Ver detalles venta #' + id + ' (implementar modal si se desea)');
+};
+
 
 // ==================== FUNCIONES DE CUENTAS POR PAGAR ====================
 async function cargarCuentasPagar() {
