@@ -50,6 +50,9 @@ app.use(express.static(path.join(__dirname, '..', 'public')));
 // NO realiza cambios destructivos por defecto. Si de verdad quieres que el servidor ejecute
 // las operaciones de eliminación automáticamente, exporta la variable de entorno
 // FORCE_SCHEMA_MIGRATE=1 antes de arrancar.
+// Mostrar mensajes de revisión de esquema solo si se define la variable de entorno
+const SHOW_SCHEMA_WARNINGS = process.env.SHOW_SCHEMA_WARNINGS === '1';
+
 (async function revisarEsquemaDetalleCompra() {
   try {
     // 1) Verificar si la columna existe
@@ -61,11 +64,11 @@ app.use(express.static(path.join(__dirname, '..', 'public')));
     const fkNames = Array.isArray(fks) ? fks.map(r => r.CONSTRAINT_NAME) : [];
 
     if (!hasColumn && fkNames.length === 0) {
-      console.log('Esquema: no se detectó columna id_talla ni FKs en detallecompra. No se requieren cambios.');
+      if (SHOW_SCHEMA_WARNINGS) console.log('Esquema: no se detectó columna id_talla ni FKs en detallecompra. No se requieren cambios.');
       return;
     }
 
-    console.log('Esquema: detectado', hasColumn ? 'columna id_talla' : '', fkNames.length ? 'FK(s): ' + fkNames.join(',') : '');
+    if (SHOW_SCHEMA_WARNINGS) console.log('Esquema: detectado', hasColumn ? 'columna id_talla' : '', fkNames.length ? 'FK(s): ' + fkNames.join(',') : '');
 
     if (process.env.FORCE_SCHEMA_MIGRATE === '1' || process.env.ALLOW_DESTRUCTIVE_MIGRATIONS === '1') {
       // Ejecutar migración destructiva SOLO si el usuario lo autoriza explícitamente
@@ -92,18 +95,20 @@ app.use(express.static(path.join(__dirname, '..', 'public')));
       } catch (e) {
         console.warn('Error durante migración forzada de esquema:', e.message || e);
       }
-    } else {
-      // No modificar; informar instrucciones para el usuario.
-      console.log('\nATENCIÓN: se detectó que el esquema tiene campo o FKs relacionadas con tallas en detallecompra.');
-      console.log('Por seguridad no se realizan cambios destructivos automáticamente.');
-      if (fkNames.length > 0) console.log('FKs detectadas:', fkNames.join(', '));
-      if (hasColumn) console.log('Columna detectada: detallecompra.id_talla');
-      console.log('\nSi quieres ejecutar la migración automática en este entorno, arranca el servidor con:');
-      console.log('  FORCE_SCHEMA_MIGRATE=1 npm run start');
-      console.log('O ejecuta manualmente las siguientes sentencias SQL (reemplaza <FK_NAME> por el nombre real):');
-      console.log("  ALTER TABLE detallecompra DROP FOREIGN KEY <FK_NAME>;  -- ejecutar por cada FK detectada");
-      console.log('  ALTER TABLE detallecompra DROP COLUMN id_talla;');
-      console.log('Si no estás seguro, haz un backup de la base de datos antes de realizar cambios.\n');
+      } else {
+      // No modificar; informar instrucciones para el usuario solo si el admin lo solicita expresamente
+      if (SHOW_SCHEMA_WARNINGS) {
+        console.log('\nATENCIÓN: se detectó que el esquema tiene campo o FKs relacionadas con tallas en detallecompra.');
+        console.log('Por seguridad no se realizan cambios destructivos automáticamente.');
+        if (fkNames.length > 0) console.log('FKs detectadas:', fkNames.join(', '));
+        if (hasColumn) console.log('Columna detectada: detallecompra.id_talla');
+        console.log('\nSi quieres ejecutar la migración automática en este entorno, arranca el servidor con:');
+        console.log('  FORCE_SCHEMA_MIGRATE=1 npm run start');
+        console.log('O ejecuta manualmente las siguientes sentencias SQL (reemplaza <FK_NAME> por el nombre real):');
+        console.log("  ALTER TABLE detallecompra DROP FOREIGN KEY <FK_NAME>;  -- ejecutar por cada FK detectada");
+        console.log('  ALTER TABLE detallecompra DROP COLUMN id_talla;');
+        console.log('Si no estás seguro, haz un backup de la base de datos antes de realizar cambios.\n');
+      }
     }
   } catch (e) {
     console.warn('Advertencia al revisar esquema detallecompra:', e.message || e);
@@ -117,7 +122,10 @@ async function procesarVenta(itemsInput, clienteData, tipo_pago, userId) {
     id_producto: Number(it.id_producto),
     id_talla: it.id_talla ? Number(it.id_talla) : null,
     cantidad: Number(it.cantidad) || 0,
-    precio_unitario: Number(it.precio_unitario) || 0
+    precio_unitario: Number(it.precio_unitario) || 0,
+    // Opciones opcionales del cliente/cajero
+    no_aplicar_promocion: !!it.no_aplicar_promocion,
+    force_promotion_id: it.force_promotion_id ? Number(it.force_promotion_id) : null
   }));
 
   // 1) Verificar stock
@@ -171,6 +179,47 @@ async function procesarVenta(itemsInput, clienteData, tipo_pago, userId) {
     const precio = it.precio_unitario || (prodMap[it.id_producto] && prodMap[it.id_producto].precio_venta) || 0;
     const subtotal = precio * it.cantidad;
     let mejor = { descuento: 0, id_promocion: null };
+    // Si el cajero indicó que no aplique promociones para este item, saltar evaluación
+    if (it.no_aplicar_promocion) {
+      descuentosPorItem.push({ item: it, descuento: 0, id_promocion: null });
+      continue;
+    }
+    // Si el cajero forzó una promoción, intentar aplicarla únicamente
+    if (it.force_promotion_id) {
+      const forced = promos.find(pp => Number(pp.id_promocion) === Number(it.force_promotion_id) && pp.activa && pp.fecha_inicio <= todayStr && pp.fecha_fin >= todayStr);
+      if (forced) {
+        let descuentoForced = 0;
+        // Validaciones similares a las de abajo
+        if (forced.id_producto && Number(forced.id_producto) !== Number(it.id_producto)) {
+          // no aplicable
+        } else if (forced.id_categoria) {
+          const cat = prodMap[it.id_producto] && prodMap[it.id_producto].id_categoria;
+          if (!cat || Number(cat) !== Number(forced.id_categoria)) {
+            // no aplicable
+          } else {
+            // calcular
+            if (forced.tipo_promocion === 'DESCUENTO_PORCENTAJE') descuentoForced = (it.precio_unitario || prodMap[it.id_producto].precio_venta || 0) * it.cantidad * (Number(forced.valor||0)/100);
+            else if (forced.tipo_promocion === 'DESCUENTO_FIJO') {
+              const val = Number(forced.valor||0);
+              descuentoForced = forced.id_producto || forced.id_categoria ? (it.cantidad * val) : (subtotalCarrito > 0 ? ( (it.precio_unitario || prodMap[it.id_producto].precio_venta || 0) * it.cantidad / subtotalCarrito) * val : 0);
+            } else if (forced.tipo_promocion === 'COMPRA_X_LLEVA_Y') {
+              const px = Number(forced.param_x||0); const py = Number(forced.param_y||0);
+              if (px>0 && py>=0) { const bloque = px+py; const completos = Math.floor(it.cantidad / bloque); const gratis = completos * py; descuentoForced = gratis * (it.precio_unitario || prodMap[it.id_producto].precio_venta || 0); }
+            }
+            descuentosPorItem.push({ item: it, descuento: descuentoForced || 0, id_promocion: forced.id_promocion });
+            continue;
+          }
+        } else {
+          // promotion without id_categoria/id_producto (global)
+          if (forced.tipo_promocion === 'DESCUENTO_PORCENTAJE') descuentoForced = (it.precio_unitario || prodMap[it.id_producto].precio_venta || 0) * it.cantidad * (Number(forced.valor||0)/100);
+          else if (forced.tipo_promocion === 'DESCUENTO_FIJO') { const val = Number(forced.valor||0); descuentoForced = subtotalCarrito>0 ? ((it.precio_unitario || prodMap[it.id_producto].precio_venta || 0) * it.cantidad / subtotalCarrito) * val : 0; }
+          else if (forced.tipo_promocion === 'COMPRA_X_LLEVA_Y') { const px = Number(forced.param_x||0); const py = Number(forced.param_y||0); if (px>0 && py>=0) { const bloque = px+py; const completos = Math.floor(it.cantidad / bloque); const gratis = completos * py; descuentoForced = gratis * (it.precio_unitario || prodMap[it.id_producto].precio_venta || 0); } }
+          descuentosPorItem.push({ item: it, descuento: descuentoForced || 0, id_promocion: forced.id_promocion });
+          continue;
+        }
+      }
+      // Si la promoción forzada no es válida, continuamos con evaluación normal
+    }
     for (const p of promos) {
       if (p.id_producto && Number(p.id_producto) !== Number(it.id_producto)) continue;
       if (p.id_categoria) {
@@ -254,7 +303,7 @@ async function procesarVenta(itemsInput, clienteData, tipo_pago, userId) {
     if (!promoNames.includes('param_y')) needPromoCols.push('param_y');
 
     if (needCols.length === 0 && needPromoCols.length === 0) {
-      console.log('Esquema: detalleventa y promociones ya contienen columnas necesarias para promociones.');
+      if (SHOW_SCHEMA_WARNINGS) console.log('Esquema: detalleventa y promociones ya contienen columnas necesarias para promociones.');
       return;
     }
 
@@ -288,10 +337,12 @@ async function procesarVenta(itemsInput, clienteData, tipo_pago, userId) {
       } catch (e) {
         console.warn('Error aplicando migración de columnas extras:', e.message || e);
       }
-    } else {
-      // No modificar la base de datos automáticamente. Mostrar mensaje informativo no intrusivo.
-      console.info('Esquema: faltan columnas opcionales para soporte completo de promociones. El servidor funcionará normalmente sin estas columnas.');
-      console.info('Si deseas crearlas más tarde, arranca el servidor con: FORCE_SCHEMA_MIGRATE=1 (asegúrate de tener un backup).');
+      } else {
+      // No modificar la base de datos automáticamente. Mostrar mensaje informativo no intrusivo solo si se solicita.
+      if (SHOW_SCHEMA_WARNINGS) {
+        console.info('Esquema: faltan columnas opcionales para soporte completo de promociones. El servidor funcionará normalmente sin estas columnas.');
+        console.info('Si deseas crearlas más tarde, arranca el servidor con: FORCE_SCHEMA_MIGRATE=1 (asegúrate de tener un backup).');
+      }
     }
   } catch (e) {
     console.warn('Advertencia al revisar esquema detalleventa/promociones:', e.message || e);
@@ -636,6 +687,18 @@ app.get('/api/promociones', requiereRol('administrador'), async (req, res) => {
     res.json({ ok: true, promociones: rows });
   } catch (e) {
     console.error('Error listar promociones:', e.message || e);
+    res.status(500).json({ ok: false, promociones: [] });
+  }
+});
+
+// Endpoint público: obtener promociones activas (para uso en Caja, solo lectura)
+app.get('/api/promociones/activas', requiereRol('cualquiera'), async (req, res) => {
+  try {
+    const todayStr = new Date().toISOString().slice(0,10);
+    const [rows] = await pool.query('SELECT id_promocion, nombre, descripcion, tipo_promocion, valor, fecha_inicio, fecha_fin, activa, id_categoria, id_producto, minimo_compra, param_x, param_y FROM promociones WHERE activa = 1 AND fecha_inicio <= ? AND fecha_fin >= ? ORDER BY fecha_inicio DESC', [todayStr, todayStr]);
+    res.json({ ok: true, promociones: rows });
+  } catch (e) {
+    console.error('Error listar promociones activas:', e.message || e);
     res.status(500).json({ ok: false, promociones: [] });
   }
 });

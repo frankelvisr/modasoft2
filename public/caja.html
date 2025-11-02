@@ -28,6 +28,7 @@
         <div class="row header-row">
           <h4>Nueva Transacción</h4>
         </div>
+        <div id="cajaNotif" style="margin-bottom:10px;"></div>
         <form id="form-venta-caja" style="width:100%;">
           <div class="row form-row">
             <div class="col">
@@ -102,8 +103,9 @@
             </div>
           </div>
         </form>
-        <div class="row header-row" style="margin-top:var(--spacing-lg);">
-          <h4>Carrito de Compra</h4>
+        <div class="row header-row" style="margin-top:var(--spacing-lg); align-items:center;">
+          <h4 style="margin:0;">Carrito de Compra</h4>
+          <div style="margin-left:auto;"><button id="btnRecargarPromos" class="btn secondary" type="button">Recargar promociones</button></div>
         </div>
         <div id="ventaDetalle" class="list">
           <div class="item">Carrito vacío. Agrega productos para la venta.</div>
@@ -150,5 +152,13 @@
   <script src="cliente.js"></script>
   <script src="devoluciones.js"></script>
   <script src="caja-funcionalidades.js"></script>
+  <!-- Modal para detalles de promoción -->
+  <div id="promoModal" class="promo-modal" style="display:none;">
+    <div class="promo-modal-content">
+      <button id="promoModalClose" class="btn" style="float:right;">Cerrar</button>
+      <h3 id="promoModalTitle">Detalle de promoción</h3>
+      <div id="promoModalBody"></div>
+    </div>
+  </div>
 </body>
 </html>

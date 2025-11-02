@@ -10,6 +10,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.getElementById('btnAgregarProducto').addEventListener('click', onAgregarAlCarrito);
     document.getElementById('btnPagarVenta').addEventListener('click', onPagarVenta);
+    // Botón para recargar promociones manualmente
+    const btnRecargar = document.getElementById('btnRecargarPromos');
+    if (btnRecargar) btnRecargar.addEventListener('click', async () => {
+      showNotification('Recargando promociones...', 'info');
+      await loadPromociones();
+      renderCart();
+      showNotification('Promociones recargadas.', 'info', 3000);
+    });
   }
 });
 
@@ -34,13 +42,27 @@ async function loadProductosForCaja() {
 
 async function loadPromociones() {
   try {
-    const res = await fetch('/api/promociones');
+    const res = await fetch('/api/promociones/activas');
     if (!res.ok) return;
     const data = await res.json();
     promocionesCache = data.promociones || [];
   } catch (e) {
     console.error('Error cargando promociones:', e);
+    showNotification('No se pudieron cargar las promociones. Intenta recargar.', 'error');
   }
+}
+
+function showNotification(message, type = 'info', timeout = 0) {
+  const container = document.getElementById('cajaNotif');
+  if (!container) return;
+  container.innerHTML = `<div class="notif ${type}">${message}</div>`;
+  if (timeout && timeout > 0) setTimeout(() => { container.innerHTML = ''; }, timeout);
+}
+
+function clearNotification() {
+  const container = document.getElementById('cajaNotif');
+  if (!container) return;
+  container.innerHTML = '';
 }
 
 function onProductoChange() {
@@ -72,7 +94,7 @@ function onAgregarAlCarrito() {
   const precio_unitario = parseFloat(document.getElementById('ventaPrecioUnitario').value || 0) || 0;
   if (!id_producto || !cantidad || cantidad <= 0) { alert('Selecciona producto y cantidad válida'); return; }
   const prod = productosCache.find(p => String(p.id_producto) === String(id_producto));
-  cajaCart.push({ id_producto: Number(id_producto), id_talla: id_talla ? Number(id_talla) : null, cantidad, precio_unitario, nombre: prod ? (prod.nombre || prod.marca) : 'Producto' });
+  cajaCart.push({ id_producto: Number(id_producto), id_talla: id_talla ? Number(id_talla) : null, cantidad, precio_unitario, nombre: prod ? (prod.nombre || prod.marca) : 'Producto', no_aplicar_promocion: false, force_promotion_id: null });
   renderCart();
 }
 
@@ -83,6 +105,36 @@ function aplicarMejorPromocion(item) {
   let mejor = { descuento: 0, promo: null, detalle: null };
   const subtotal = item.precio_unitario * item.cantidad;
   const subtotalCarrito = cajaCart.reduce((s,it)=>s + (it.precio_unitario * it.cantidad), 0);
+  // Si el cajero deshabilitó promociones para este item
+  if (item.no_aplicar_promocion) return { descuento: 0, promo: null, detalle: null };
+
+  // Si el cajero forzó una promoción específica
+  if (item.force_promotion_id) {
+    const forced = pAplicables.find(pp => Number(pp.id_promocion) === Number(item.force_promotion_id));
+    if (forced) {
+      // aplicar la promoción forzada (reutilizar la lógica de cálculo)
+      const p = forced;
+      let descuentoForced = 0;
+      if (p.tipo_promocion === 'DESCUENTO_PORCENTAJE') {
+        descuentoForced = subtotal * (Number(p.valor || 0) / 100);
+      } else if (p.tipo_promocion === 'DESCUENTO_FIJO') {
+        const val = Number(p.valor || 0);
+        if (p.id_producto || p.id_categoria) descuentoForced = item.cantidad * val;
+        else descuentoForced = subtotalCarrito > 0 ? (subtotal / subtotalCarrito) * val : 0;
+      } else if (p.tipo_promocion === 'COMPRA_X_LLEVA_Y') {
+        const paramX = Number(p.param_x || 0);
+        const paramY = Number(p.param_y || 0);
+        if (paramX > 0 && paramY >= 0) {
+          const bloque = paramX + paramY;
+          const completos = Math.floor(item.cantidad / bloque);
+          const gratis = completos * paramY;
+          descuentoForced = gratis * item.precio_unitario;
+        }
+      }
+      return { descuento: descuentoForced, promo: p, detalle: { subtotal } };
+    }
+  }
+
   for (const p of pAplicables) {
     if (p.id_producto && Number(p.id_producto) !== Number(item.id_producto)) continue;
     if (p.id_categoria && Number(p.id_categoria) !== Number(prodInfo.id_categoria)) continue;
@@ -121,10 +173,28 @@ function renderCart() {
     const descuento = Number(calc.descuento || 0);
     const lineaTotal = (it.precio_unitario * it.cantidad) - descuento;
     total += lineaTotal; totalDescuentos += descuento;
+    // Controles: checkbox para aplicar/ignorar promo y select para forzar promoción
+    const promoOptions = promocionesCache.filter(p => {
+      if (!p.activa) return false;
+      const now = new Date();
+      if (new Date(p.fecha_inicio) > now || new Date(p.fecha_fin) < now) return false;
+      if (p.id_producto && Number(p.id_producto) !== Number(it.id_producto)) return false;
+      return true;
+    });
+    const promoSelectHtml = promoOptions.length > 0 ? `
+      <select onchange="window._caja.setForcedPromo(${idx}, this.value)">
+        <option value="">Auto</option>
+        ${promoOptions.map(pp => `<option value="${pp.id_promocion}" ${it.force_promotion_id && Number(it.force_promotion_id)===Number(pp.id_promocion)?'selected':''}>Forzar: ${pp.nombre}</option>`).join('')}
+      </select>` : '';
+
     html += `<div class="item" data-idx="${idx}">
-      <div><strong>${it.nombre || ('#'+it.id_producto)}</strong> x${it.cantidad} @ $${parseFloat(it.precio_unitario||0).toFixed(2)}</div>
-      <div style="font-size:0.9em;color:#666;">Subtotal: $${(it.precio_unitario*it.cantidad).toFixed(2)} ${descuento>0?`| Descuento: -$${descuento.toFixed(2)} (${calc.promo?calc.promo.nombre:'promo'})`:''}</div>
-      <div style="margin-top:6px;">Total línea: $${lineaTotal.toFixed(2)} <button class="btn btn-small secondary" onclick="removeCartItem(${idx})">Eliminar</button></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;"><strong>${it.nombre || ('#'+it.id_producto)}</strong> <button class="btn btn-small secondary" onclick="removeCartItem(${idx})">Eliminar</button></div>
+      <div style="font-size:0.9em;color:#666;">Subtotal: $${(it.precio_unitario*it.cantidad).toFixed(2)} ${descuento>0?`| Descuento: -$${descuento.toFixed(2)} (${calc.promo?calc.promo.nombre:'promo'})`:''} ${calc.promo?` <button class="btn" onclick="window._caja.showPromoDetails(${idx})" style="margin-left:8px;">Detalles promo</button>`:''}</div>
+      <div style="margin-top:6px;display:flex;gap:8px;align-items:center;">
+        <label style="font-size:0.9em;"><input type="checkbox" ${it.no_aplicar_promocion? 'checked' : ''} onchange="window._caja.toggleNoPromo(${idx}, this.checked)"> Ignorar promo</label>
+        ${promoSelectHtml}
+        <div style="margin-left:auto;font-weight:700;">Total línea: $${lineaTotal.toFixed(2)}</div>
+      </div>
     </div>`;
   });
   html += `<div class="item" style="border-top:1px solid #eee;padding-top:8px;"><strong>Total descuentos:</strong> $${totalDescuentos.toFixed(2)} — <strong>Total a pagar:</strong> $${total.toFixed(2)}</div>`;
@@ -147,7 +217,7 @@ async function onPagarVenta() {
     const res = await fetch('/api/caja/venta', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ items: cajaCart, cliente_nombre: cliente.nombre, cliente_cedula: cliente.cedula, cliente_telefono: cliente.telefono, cliente_email: cliente.email, tipo_pago })
+        body: JSON.stringify({ items: cajaCart.map(it=>({ id_producto: it.id_producto, id_talla: it.id_talla, cantidad: it.cantidad, precio_unitario: it.precio_unitario, no_aplicar_promocion: !!it.no_aplicar_promocion, force_promotion_id: it.force_promotion_id })), cliente_nombre: cliente.nombre, cliente_cedula: cliente.cedula, cliente_telefono: cliente.telefono, cliente_email: cliente.email, tipo_pago })
     });
     if (!res.ok) {
       const err = await res.json().catch(()=>({message:'Error servidor'}));
@@ -170,4 +240,50 @@ async function onPagarVenta() {
 }
 
 // Export para tests manuales
-if (typeof window !== 'undefined') window._caja = { cajaCart, renderCart, aplicarMejorPromocion };
+if (typeof window !== 'undefined') window._caja = {
+  cajaCart,
+  renderCart,
+  aplicarMejorPromocion,
+  toggleNoPromo: (idx, checked) => { if (cajaCart[idx]) { cajaCart[idx].no_aplicar_promocion = !!checked; renderCart(); } },
+  setForcedPromo: (idx, promoId) => { if (cajaCart[idx]) { cajaCart[idx].force_promotion_id = promoId ? Number(promoId) : null; renderCart(); } },
+  showPromoDetails: (idx) => {
+    try {
+      const item = cajaCart[idx];
+      if (!item) return;
+      const calc = aplicarMejorPromocion(item);
+      const promo = calc && calc.promo ? calc.promo : null;
+      const modal = document.getElementById('promoModal');
+      const title = document.getElementById('promoModalTitle');
+      const body = document.getElementById('promoModalBody');
+      if (!modal || !title || !body) return;
+      if (!promo) {
+        title.textContent = 'Sin promoción aplicable';
+        body.innerHTML = '<p>No hay promociones aplicables para esta línea.</p>';
+      } else {
+        title.textContent = promo.nombre || 'Promoción';
+        body.innerHTML = `
+          <p><strong>Tipo:</strong> ${promo.tipo_promocion}</p>
+          <p><strong>Descripción:</strong> ${promo.descripcion || '-'} </p>
+          <p><strong>Válida desde:</strong> ${promo.fecha_inicio} hasta ${promo.fecha_fin}</p>
+          <p><strong>Condiciones:</strong> ${promo.minimo_compra ? 'Mínimo compra: ' + promo.minimo_compra : 'Ninguna'}</p>
+          <p><strong>Parámetros:</strong> ${promo.param_x ? 'X=' + promo.param_x : ''} ${promo.param_y ? ' Y=' + promo.param_y : ''}</p>
+          <hr>
+          <p><strong>Detalle cálculo:</strong></p>
+          <pre style="white-space:pre-wrap;">Subtotal línea: $${(item.precio_unitario*item.cantidad).toFixed(2)}\nDescuento estimado: $${(calc.descuento||0).toFixed(2)}</pre>
+        `;
+      }
+      modal.style.display = 'block';
+    } catch (e) { console.error('Error mostrando detalles de promo:', e); }
+  }
+};
+
+// Modal close handler
+if (typeof document !== 'undefined') {
+  document.addEventListener('DOMContentLoaded', () => {
+    const pm = document.getElementById('promoModal');
+    const pmClose = document.getElementById('promoModalClose');
+    if (pmClose) pmClose.addEventListener('click', () => { if (pm) pm.style.display = 'none'; });
+    // Cerrar click fuera del contenido
+    if (pm) pm.addEventListener('click', (ev) => { if (ev.target === pm) pm.style.display = 'none'; });
+  });
+}
