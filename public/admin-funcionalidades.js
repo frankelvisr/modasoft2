@@ -46,6 +46,16 @@ document.addEventListener('DOMContentLoaded', function() {
         cargarPromociones();
     }
 
+    // Mostrar parametros X/Y cuando se selecciona COMPRA_X_LLEVA_Y
+    const promoTipoEl = document.getElementById('promoTipo');
+    const promoParamsEl = document.getElementById('promoParams');
+    if (promoTipoEl && promoParamsEl) {
+        promoTipoEl.addEventListener('change', function() {
+            if (promoTipoEl.value === 'COMPRA_X_LLEVA_Y') promoParamsEl.style.display = 'block';
+            else promoParamsEl.style.display = 'none';
+        });
+    }
+
     // Contabilidad
     if (document.getElementById('selectPeriodoIngresos')) {
         document.getElementById('selectPeriodoIngresos').addEventListener('change', cargarIngresos);
@@ -351,7 +361,10 @@ async function crearPromocion(e) {
                 fecha_inicio: document.getElementById('promoFechaInicio').value,
                 fecha_fin: document.getElementById('promoFechaFin').value,
                 id_categoria: document.getElementById('promoAplicarA').value || null,
-                minimo_compra: parseFloat(document.getElementById('promoMinimoCompra').value)
+                minimo_compra: parseFloat(document.getElementById('promoMinimoCompra').value),
+                param_x: document.getElementById('promoParamX') ? parseInt(document.getElementById('promoParamX').value) || null : null,
+                param_y: document.getElementById('promoParamY') ? parseInt(document.getElementById('promoParamY').value) || null : null,
+                descripcion: document.getElementById('promoDescripcion') ? document.getElementById('promoDescripcion').value : null
             })
         });
 

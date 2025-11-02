@@ -89,6 +89,35 @@ modasoft-main/
 - Edita `servidor/db.js` para ajustar la conexión a la base de datos
 - Las variables de entorno se configuran en `.env`
 
+### Migraciones y soporte de Promociones
+
+Este repositorio incluye mejoras para soportar promociones avanzadas (COMPRA_X_LLEVA_Y) y trazabilidad de promociones en las ventas.
+
+- Archivo SQL con las extensiones: `db/promociones.sql` (contiene sentencias ALTER para añadir `param_x`, `param_y` en `promociones` y `id_promocion_aplicada`, `descuento_unitario`, `descuento_total` en `detalleventa`).
+- Recomendación: antes de ejecutar cualquier ALTER, exporta un dump de la base de datos (backup).
+
+Si tu entorno local no tiene MySQL disponible, puedes arrancar rápidamente una instancia de MariaDB con Docker (válido para pruebas locales):
+
+```bash
+# Descargar y arrancar MariaDB temporal
+docker run -d --name modasoft-mariadb -e MYSQL_ROOT_PASSWORD=rootpass -e MYSQL_DATABASE=modasoft_db -p 3306:3306 mariadb:10.4
+
+# Luego importa el SQL (ajusta la ruta):
+docker exec -i modasoft-mariadb sh -c 'exec mysql -uroot -prootpass modasoft_db' < db/promociones.sql
+```
+
+Nota: en producción revisa los tiempos de bloqueo de ALTER TABLE y usa herramientas seguras para migraciones en tablas grandes.
+
+### Ejecutar migraciones desde el servidor (opcional)
+Si prefieres que el servidor añada las columnas faltantes automáticamente (no destructivo), arranca con la variable de entorno:
+
+```bash
+FORCE_SCHEMA_MIGRATE=1 npm start
+```
+
+Esto intentará crear las columnas faltantes (`param_x`, `param_y`, `id_promocion_aplicada`, `descuento_unitario`, `descuento_total`) sin eliminar datos existentes.
+
+
 ## 📝 Notas
 
 - El sistema utiliza bcrypt para encriptación de contraseñas

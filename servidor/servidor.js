@@ -1,4 +1,3 @@
-
 // servidor/servidor.js
 
 const express = require('express');
@@ -47,36 +46,261 @@ app.use(cookieSession({
 // Servir archivos estáticos (front-end)
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
-// Intento de migración ligera al iniciar: eliminar id_talla de detallecompra porque las compras no usan talla
-(async function ajustarEsquemaDetalleCompra() {
+// Revisión segura del esquema al iniciar: detecta si existe `id_talla` en `detallecompra` o FKs
+// NO realiza cambios destructivos por defecto. Si de verdad quieres que el servidor ejecute
+// las operaciones de eliminación automáticamente, exporta la variable de entorno
+// FORCE_SCHEMA_MIGRATE=1 antes de arrancar.
+(async function revisarEsquemaDetalleCompra() {
   try {
-    // 1) Intentar eliminar la clave foránea hacia tallas si existe
-    try {
-      await pool.query("ALTER TABLE detallecompra DROP FOREIGN KEY detallecompra_ibfk_3");
-      console.log('Esquema: se eliminó la FK detallecompra_ibfk_3 (si existía).');
-    } catch (e) {
-      // si la FK no existe con ese nombre, intentamos buscar y eliminar cualquier FK que referencia tallas
-      try {
-        const [fks] = await pool.query("SELECT CONSTRAINT_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'detallecompra' AND REFERENCED_TABLE_NAME = 'tallas'");
-        for (const fk of fks) {
-          await pool.query(`ALTER TABLE detallecompra DROP FOREIGN KEY \`${fk.CONSTRAINT_NAME}\``);
-          console.log(`Esquema: se eliminó la FK ${fk.CONSTRAINT_NAME} en detallecompra`);
-        }
-      } catch (e2) {
-        // no crítico
-      }
+    // 1) Verificar si la columna existe
+    const [cols] = await pool.query("SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'detallecompra' AND COLUMN_NAME = 'id_talla'");
+    const hasColumn = Array.isArray(cols) && cols.length > 0;
+
+    // 2) Buscar FKs que referencien la tabla 'tallas'
+    const [fks] = await pool.query("SELECT CONSTRAINT_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'detallecompra' AND REFERENCED_TABLE_NAME = 'tallas'");
+    const fkNames = Array.isArray(fks) ? fks.map(r => r.CONSTRAINT_NAME) : [];
+
+    if (!hasColumn && fkNames.length === 0) {
+      console.log('Esquema: no se detectó columna id_talla ni FKs en detallecompra. No se requieren cambios.');
+      return;
     }
 
-    // 2) Intentar DROP COLUMN id_talla si existe
-    try {
-      await pool.query('ALTER TABLE detallecompra DROP COLUMN id_talla');
-      console.log('Esquema: columna detallecompra.id_talla eliminada (si existía).');
-    } catch (e) {
-      // Si falla, puede que la columna no exista o no tengamos permisos; registramos y seguimos
-      console.warn('Advertencia al intentar eliminar columna detallecompra.id_talla:', e.message || e);
+    console.log('Esquema: detectado', hasColumn ? 'columna id_talla' : '', fkNames.length ? 'FK(s): ' + fkNames.join(',') : '');
+
+    if (process.env.FORCE_SCHEMA_MIGRATE === '1' || process.env.ALLOW_DESTRUCTIVE_MIGRATIONS === '1') {
+      // Ejecutar migración destructiva SOLO si el usuario lo autoriza explícitamente
+      try {
+        // Eliminar cada FK detectada
+        for (const fkName of fkNames) {
+          try {
+            await pool.query(`ALTER TABLE detallecompra DROP FOREIGN KEY \`${fkName}\``);
+            console.log(`Esquema: se eliminó la FK ${fkName} en detallecompra`);
+          } catch (e) {
+            console.warn(`No se pudo eliminar la FK ${fkName}:`, e.message || e);
+          }
+        }
+
+        // Eliminar columna si existe
+        if (hasColumn) {
+          try {
+            await pool.query('ALTER TABLE detallecompra DROP COLUMN id_talla');
+            console.log('Esquema: columna detallecompra.id_talla eliminada.');
+          } catch (e) {
+            console.warn('No se pudo eliminar detallecompra.id_talla:', e.message || e);
+          }
+        }
+      } catch (e) {
+        console.warn('Error durante migración forzada de esquema:', e.message || e);
+      }
+    } else {
+      // No modificar; informar instrucciones para el usuario.
+      console.log('\nATENCIÓN: se detectó que el esquema tiene campo o FKs relacionadas con tallas en detallecompra.');
+      console.log('Por seguridad no se realizan cambios destructivos automáticamente.');
+      if (fkNames.length > 0) console.log('FKs detectadas:', fkNames.join(', '));
+      if (hasColumn) console.log('Columna detectada: detallecompra.id_talla');
+      console.log('\nSi quieres ejecutar la migración automática en este entorno, arranca el servidor con:');
+      console.log('  FORCE_SCHEMA_MIGRATE=1 npm run start');
+      console.log('O ejecuta manualmente las siguientes sentencias SQL (reemplaza <FK_NAME> por el nombre real):');
+      console.log("  ALTER TABLE detallecompra DROP FOREIGN KEY <FK_NAME>;  -- ejecutar por cada FK detectada");
+      console.log('  ALTER TABLE detallecompra DROP COLUMN id_talla;');
+      console.log('Si no estás seguro, haz un backup de la base de datos antes de realizar cambios.\n');
     }
   } catch (e) {
-    console.warn('Advertencia en ajuste de esquema detallecompra:', e.message || e);
+    console.warn('Advertencia al revisar esquema detallecompra:', e.message || e);
+  }
+})();
+
+// Helper: procesar venta (reusable por /api/ventas y /api/caja/venta)
+async function procesarVenta(itemsInput, clienteData, tipo_pago, userId) {
+  // itemsInput: array of {id_producto, id_talla, cantidad, precio_unitario}
+  const items = itemsInput.map(it => ({
+    id_producto: Number(it.id_producto),
+    id_talla: it.id_talla ? Number(it.id_talla) : null,
+    cantidad: Number(it.cantidad) || 0,
+    precio_unitario: Number(it.precio_unitario) || 0
+  }));
+
+  // 1) Verificar stock
+  for (const it of items) {
+    if (!it.id_producto || !it.cantidad || it.cantidad <= 0) throw new Error('Item inválido: id_producto y cantidad son requeridos');
+    if (it.id_talla) {
+      const [invRows] = await pool.query('SELECT cantidad FROM inventario WHERE id_producto = ? AND id_talla = ? LIMIT 1', [it.id_producto, it.id_talla]);
+      if (invRows.length === 0) throw new Error(`No hay inventario para producto ${it.id_producto} talla ${it.id_talla}`);
+      const disponible = Number(invRows[0].cantidad) || 0;
+      if (disponible < it.cantidad) throw new Error(`Stock insuficiente para producto ${it.id_producto} talla ${it.id_talla}. Disponible: ${disponible}`);
+    } else {
+      const [pRows] = await pool.query('SELECT inventario FROM productos WHERE id_producto = ? LIMIT 1', [it.id_producto]);
+      if (pRows.length === 0) throw new Error(`Producto no encontrado: ${it.id_producto}`);
+      const disponible = Number(pRows[0].inventario || 0);
+      if (disponible < it.cantidad) throw new Error(`Stock insuficiente para producto ${it.id_producto}. Disponible: ${disponible}`);
+    }
+  }
+
+  // 2) Buscar o crear cliente
+  let id_cliente = null;
+  if (clienteData && clienteData.cedula) {
+    const [cliRows] = await pool.query('SELECT id_cliente FROM clientes WHERE cedula = ? LIMIT 1', [clienteData.cedula]);
+    if (cliRows.length > 0) {
+      id_cliente = cliRows[0].id_cliente;
+    } else {
+      const [cliRes] = await pool.query('INSERT INTO clientes (nombre, cedula, telefono, email) VALUES (?, ?, ?, ?)', [clienteData.nombre || '', clienteData.cedula || null, clienteData.telefono || '', clienteData.email || '']);
+      id_cliente = cliRes.insertId;
+    }
+  }
+
+  // 3) Obtener promociones activas
+  const todayStr = new Date().toISOString().slice(0,10);
+  const [promos] = await pool.query('SELECT * FROM promociones WHERE activa = 1 AND fecha_inicio <= ? AND fecha_fin >= ?', [todayStr, todayStr]);
+
+  // 4) Obtener info de productos
+  const prodIds = [...new Set(items.map(i => i.id_producto))];
+  const [productosInfo] = await pool.query(`SELECT id_producto, id_categoria, precio_venta FROM productos WHERE id_producto IN (${prodIds.map(_=>'?').join(',')})`, prodIds);
+  const prodMap = {};
+  productosInfo.forEach(p => { prodMap[p.id_producto] = p; });
+
+  // 5) Calcular descuentos
+  const descuentosPorItem = [];
+  let subtotalCarrito = 0;
+  for (const it of items) {
+    const precio = it.precio_unitario || (prodMap[it.id_producto] && prodMap[it.id_producto].precio_venta) || 0;
+    const subtotal = precio * it.cantidad;
+    subtotalCarrito += subtotal;
+  }
+
+  for (const it of items) {
+    const precio = it.precio_unitario || (prodMap[it.id_producto] && prodMap[it.id_producto].precio_venta) || 0;
+    const subtotal = precio * it.cantidad;
+    let mejor = { descuento: 0, id_promocion: null };
+    for (const p of promos) {
+      if (p.id_producto && Number(p.id_producto) !== Number(it.id_producto)) continue;
+      if (p.id_categoria) {
+        const cat = prodMap[it.id_producto] && prodMap[it.id_producto].id_categoria;
+        if (!cat || Number(cat) !== Number(p.id_categoria)) continue;
+      }
+      const minimo = Number(p.minimo_compra || 0);
+      if (minimo > 0) {
+        const scopeSubtotal = (p.id_producto || p.id_categoria) ? subtotal : subtotalCarrito;
+        if (scopeSubtotal < minimo) continue;
+      }
+      let descuento = 0;
+      if (p.tipo_promocion === 'DESCUENTO_PORCENTAJE') {
+        descuento = subtotal * (Number(p.valor || 0) / 100);
+      } else if (p.tipo_promocion === 'DESCUENTO_FIJO') {
+        const val = Number(p.valor || 0);
+        if (p.id_producto || p.id_categoria) descuento = it.cantidad * val;
+        else descuento = subtotalCarrito > 0 ? (subtotal / subtotalCarrito) * val : 0;
+      } else if (p.tipo_promocion === 'COMPRA_X_LLEVA_Y') {
+        const paramX = Number(p.param_x || 0);
+        const paramY = Number(p.param_y || 0);
+        if (paramX > 0 && paramY >= 0) {
+          const bloque = paramX + paramY;
+          const completos = Math.floor(it.cantidad / bloque);
+          const gratis = completos * paramY;
+          descuento = gratis * precio;
+        }
+      }
+      if (descuento > mejor.descuento) mejor = { descuento, id_promocion: p.id_promocion };
+    }
+    descuentosPorItem.push({ item: it, descuento: mejor.descuento || 0, id_promocion: mejor.id_promocion || null });
+  }
+
+  const totalDescuentos = descuentosPorItem.reduce((s, d) => s + Number(d.descuento || 0), 0);
+  const subtotalSuma = items.reduce((s, it) => s + ((it.precio_unitario || (prodMap[it.id_producto] && prodMap[it.id_producto].precio_venta) || 0) * it.cantidad), 0);
+  const totalFinal = Math.max(0, subtotalSuma - totalDescuentos);
+
+  // Insert venta
+  const [ventaRes] = await pool.query('INSERT INTO ventas (fecha_hora, total_venta, tipo_pago, id_usuario, id_cliente) VALUES (NOW(), ?, ?, ?, ?)', [totalFinal, tipo_pago || 'Efectivo', userId, id_cliente || null]);
+  const id_venta = ventaRes.insertId;
+
+  // Insert detalle
+  const [colsDetalle] = await pool.query("SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'detalleventa'");
+  const colNames = colsDetalle.map(c => c.COLUMN_NAME);
+  const hasPromoCols = colNames.includes('id_promocion_aplicada') && colNames.includes('descuento_unitario') && colNames.includes('descuento_total');
+
+  for (const dp of descuentosPorItem) {
+    const it = dp.item;
+    const descuento = Number(dp.descuento || 0);
+    const precio = it.precio_unitario || (prodMap[it.id_producto] && prodMap[it.id_producto].precio_venta) || 0;
+    const descuentoUnitario = it.cantidad > 0 ? (descuento / it.cantidad) : 0;
+    if (hasPromoCols) {
+      await pool.query('INSERT INTO detalleventa (id_venta, id_producto, id_talla, cantidad, precio_unitario, id_promocion_aplicada, descuento_unitario, descuento_total) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', [id_venta, it.id_producto, it.id_talla || null, it.cantidad, precio, dp.id_promocion || null, descuentoUnitario, descuento]);
+    } else {
+      await pool.query('INSERT INTO detalleventa (id_venta, id_producto, id_talla, cantidad, precio_unitario) VALUES (?, ?, ?, ?, ?)', [id_venta, it.id_producto, it.id_talla || null, it.cantidad, precio]);
+    }
+    if (it.id_talla) {
+      await pool.query('UPDATE inventario SET cantidad = GREATEST(0, cantidad - ?) WHERE id_producto = ? AND id_talla = ?', [it.cantidad, it.id_producto, it.id_talla]);
+    }
+    await pool.query('UPDATE productos SET inventario = GREATEST(0, inventario - ?) WHERE id_producto = ?', [it.cantidad, it.id_producto]);
+  }
+
+  return { id_venta, total: totalFinal, descuentos: totalDescuentos };
+}
+// Revisión segura para 'detalleventa' y columnas necesarias para promociones
+(async function revisarEsquemaDetalleVentaYPromos() {
+  try {
+    // Verificar columnas en detalleventa
+    const [cols] = await pool.query("SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'detalleventa'");
+    const names = cols.map(c => c.COLUMN_NAME);
+    const needCols = [];
+    if (!names.includes('id_promocion_aplicada')) needCols.push('id_promocion_aplicada');
+    if (!names.includes('descuento_unitario')) needCols.push('descuento_unitario');
+    if (!names.includes('descuento_total')) needCols.push('descuento_total');
+
+    // Verificar columnas param_x/param_y en promociones
+    const [colsPromo] = await pool.query("SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'promociones'");
+    const promoNames = colsPromo.map(c => c.COLUMN_NAME);
+    const needPromoCols = [];
+    if (!promoNames.includes('param_x')) needPromoCols.push('param_x');
+    if (!promoNames.includes('param_y')) needPromoCols.push('param_y');
+
+    if (needCols.length === 0 && needPromoCols.length === 0) {
+      console.log('Esquema: detalleventa y promociones ya contienen columnas necesarias para promociones.');
+      return;
+    }
+
+    console.log('Esquema: columnas faltantes detectadas -> detalleventa:', needCols.join(', ') || 'ninguna', 'promociones:', needPromoCols.join(', ') || 'ninguna');
+
+    if (process.env.FORCE_SCHEMA_MIGRATE === '1' || process.env.ALLOW_DESTRUCTIVE_MIGRATIONS === '1') {
+      // Ejecutar ALTER TABLE para agregar columnas faltantes (no destructivo)
+      try {
+        for (const c of needCols) {
+          if (c === 'id_promocion_aplicada') {
+            await pool.query('ALTER TABLE detalleventa ADD COLUMN id_promocion_aplicada INT NULL');
+            console.log('Esquema: columna detalleventa.id_promocion_aplicada creada');
+          } else if (c === 'descuento_unitario') {
+            await pool.query('ALTER TABLE detalleventa ADD COLUMN descuento_unitario DECIMAL(10,2) NOT NULL DEFAULT 0');
+            console.log('Esquema: columna detalleventa.descuento_unitario creada');
+          } else if (c === 'descuento_total') {
+            await pool.query('ALTER TABLE detalleventa ADD COLUMN descuento_total DECIMAL(12,2) NOT NULL DEFAULT 0');
+            console.log('Esquema: columna detalleventa.descuento_total creada');
+          }
+        }
+
+        for (const c of needPromoCols) {
+          if (c === 'param_x') {
+            await pool.query('ALTER TABLE promociones ADD COLUMN param_x INT NULL');
+            console.log('Esquema: columna promociones.param_x creada');
+          } else if (c === 'param_y') {
+            await pool.query('ALTER TABLE promociones ADD COLUMN param_y INT NULL');
+            console.log('Esquema: columna promociones.param_y creada');
+          }
+        }
+      } catch (e) {
+        console.warn('Error aplicando migración de columnas extras:', e.message || e);
+      }
+    } else {
+      console.log('\nATENCIÓN: faltan columnas para soporte de promociones completas.');
+      if (needCols.length) console.log('Columnas faltantes en detalleventa:', needCols.join(', '));
+      if (needPromoCols.length) console.log('Columnas faltantes en promociones:', needPromoCols.join(', '));
+      console.log('Para crear automáticamente las columnas necesarias, arranca con:');
+      console.log('  FORCE_SCHEMA_MIGRATE=1 npm run start');
+      console.log('O ejecuta manualmente en la base de datos:');
+      needCols.forEach(c => console.log(`  ALTER TABLE detalleventa ADD COLUMN ${c} ${c.startsWith('id_') ? 'INT NULL' : 'DECIMAL(12,2) NOT NULL DEFAULT 0'};`));
+      needPromoCols.forEach(c => console.log(`  ALTER TABLE promociones ADD COLUMN ${c} INT NULL;`));
+      console.log('');
+    }
+  } catch (e) {
+    console.warn('Advertencia al revisar esquema detalleventa/promociones:', e.message || e);
   }
 })();
 
@@ -408,6 +632,54 @@ app.post('/api/proveedores', requiereRol('administrador'), async (req, res) => {
     res.json({ ok: true });
   } catch (e) {
     res.json({ ok: false });
+  }
+});
+
+// ------------------ Promociones: CRUD ------------------
+app.get('/api/promociones', requiereRol('administrador'), async (req, res) => {
+  try {
+    const [rows] = await pool.query('SELECT id_promocion, nombre, descripcion, tipo_promocion, valor, fecha_inicio, fecha_fin, activa, id_categoria, id_producto, minimo_compra, param_x, param_y FROM promociones ORDER BY fecha_inicio DESC');
+    res.json({ ok: true, promociones: rows });
+  } catch (e) {
+    console.error('Error listar promociones:', e.message || e);
+    res.status(500).json({ ok: false, promociones: [] });
+  }
+});
+
+app.post('/api/promociones', requiereRol('administrador'), async (req, res) => {
+  try {
+    const { nombre, descripcion, tipo_promocion, valor, fecha_inicio, fecha_fin, activa, id_categoria, id_producto, minimo_compra, param_x, param_y } = req.body;
+    if (!nombre || !tipo_promocion || valor === undefined || !fecha_inicio || !fecha_fin) return res.status(400).json({ ok: false, message: 'Campos requeridos faltantes' });
+    await pool.query('INSERT INTO promociones (nombre, descripcion, tipo_promocion, valor, fecha_inicio, fecha_fin, activa, id_categoria, id_producto, minimo_compra, param_x, param_y) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', [nombre, descripcion || null, tipo_promocion, valor, fecha_inicio, fecha_fin, activa ? 1 : 0, id_categoria || null, id_producto || null, minimo_compra || 0, param_x || null, param_y || null]);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('Error crear promocion:', e.message || e);
+    res.status(500).json({ ok: false, message: 'Error al crear promoción' });
+  }
+});
+
+app.put('/api/promociones/:id', requiereRol('administrador'), async (req, res) => {
+  try {
+    const id = req.params.id;
+    const { nombre, descripcion, tipo_promocion, valor, fecha_inicio, fecha_fin, activa, id_categoria, id_producto, minimo_compra, param_x, param_y } = req.body;
+    const [result] = await pool.query('UPDATE promociones SET nombre = ?, descripcion = ?, tipo_promocion = ?, valor = ?, fecha_inicio = ?, fecha_fin = ?, activa = ?, id_categoria = ?, id_producto = ?, minimo_compra = ?, param_x = ?, param_y = ? WHERE id_promocion = ?', [nombre, descripcion || null, tipo_promocion, valor, fecha_inicio, fecha_fin, activa ? 1 : 0, id_categoria || null, id_producto || null, minimo_compra || 0, param_x || null, param_y || null, id]);
+    if (result.affectedRows > 0) return res.json({ ok: true });
+    return res.status(404).json({ ok: false, message: 'Promoción no encontrada' });
+  } catch (e) {
+    console.error('Error actualizar promocion:', e.message || e);
+    res.status(500).json({ ok: false, message: 'Error al actualizar promoción' });
+  }
+});
+
+app.delete('/api/promociones/:id', requiereRol('administrador'), async (req, res) => {
+  try {
+    const id = req.params.id;
+    const [result] = await pool.query('DELETE FROM promociones WHERE id_promocion = ?', [id]);
+    if (result.affectedRows > 0) return res.json({ ok: true });
+    return res.status(404).json({ ok: false, message: 'Promoción no encontrada' });
+  } catch (e) {
+    console.error('Error eliminar promocion:', e.message || e);
+    res.status(500).json({ ok: false, message: 'Error al eliminar promoción' });
   }
 });
 
@@ -813,25 +1085,35 @@ app.get('/api/clientes/buscar', requiereRol('caja'), async (req, res) => {
 
 // Registro de venta simple (AJUSTADO para coincidir con la llamada simple del front-end)
 app.post('/api/caja/venta', requiereRol('caja'), async (req, res) => {
+  // Si el front envía un arreglo de items, procesamos la venta completa (con promociones)
+  if (Array.isArray(req.body.items) && req.body.items.length > 0) {
+    try {
+      const clienteData = {
+        nombre: req.body.cliente_nombre || null,
+        cedula: req.body.cliente_cedula || null,
+        telefono: req.body.cliente_telefono || null,
+        email: req.body.cliente_email || null
+      };
+      const tipo_pago = req.body.tipo_pago || 'Efectivo';
+      const result = await procesarVenta(req.body.items, clienteData, tipo_pago, req.session.user.id);
+      return res.json(Object.assign({ ok: true }, result));
+    } catch (e) {
+      console.error('Error procesando venta en caja (items):', e.message || e);
+      return res.status(500).json({ ok: false, message: e.message || 'Error al procesar venta' });
+    }
+  }
+
+  // Si no hay items, mantenemos comportamiento simple por compatibilidad
   const { id_cliente, monto } = req.body;
-  
-  // Datos simplificados para la venta a través del formulario de "Caja"
   const total_venta = monto;
-  const tipo_pago = 'Efectivo'; // Valor por defecto
-  
+  const tipo_pago = 'Efectivo';
   try {
-    // 1) Crear venta (en tabla Ventas)
     const [ventaResult] = await pool.query(
       `INSERT INTO ventas (fecha_hora, total_venta, tipo_pago, id_usuario, id_cliente)
        VALUES (NOW(), ?, ?, ?, ?)`,
       [total_venta, tipo_pago, req.session.user.id, id_cliente || null]
     );
     const id_venta = ventaResult.insertId;
-
-    // Aquí no se inserta DetalleVenta ni se actualiza Inventario
-    // porque el formulario del front-end es muy simple,
-    // pero la ruta es funcional y registra la venta principal.
-    
     res.json({ ok: true, id_venta });
   } catch (e) {
     console.error(e);
@@ -849,55 +1131,17 @@ app.post('/api/ventas', requiereRol('caja'), async (req, res) => {
     id_producto, id_talla, cantidad, precio_unitario, tipo_pago
   } = req.body;
 
-  if (!id_producto || !id_talla || !cantidad || cantidad <= 0) {
-    return res.status(400).json({ ok: false, message: 'Faltan id_producto, id_talla o cantidad válida.' });
-  }
+  // Normalizar items
+  let items = Array.isArray(req.body.items) ? req.body.items : [];
+  if (items.length === 0 && id_producto) items = [{ id_producto, id_talla, cantidad, precio_unitario }];
 
+  const clienteData = { nombre: cliente_nombre || null, cedula: cliente_cedula || null, telefono: cliente_telefono || null, email: cliente_email || null };
   try {
-    // 1. Verificar stock en inventario
-    const [invRows] = await pool.query('SELECT cantidad FROM inventario WHERE id_producto = ? AND id_talla = ? LIMIT 1', [id_producto, id_talla]);
-    if (invRows.length === 0) {
-      return res.status(400).json({ ok: false, message: 'No hay inventario para ese producto/talla.' });
-    }
-    const disponible = Number(invRows[0].cantidad) || 0;
-    if (disponible === 0) {
-      return res.status(400).json({ ok: false, message: 'No hay unidades disponibles para la talla seleccionada.' });
-    }
-    const cantidadNum = Number(cantidad);
-    const precioNum = Number(precio_unitario) || 0;
-
-    if (disponible < cantidadNum) {
-      return res.status(400).json({ ok: false, message: `Stock insuficiente. Disponible: ${disponible}` });
-    }
-
-    // 2. Buscar o crear cliente
-    let id_cliente = null;
-    const [cliRows] = await pool.query('SELECT id_cliente FROM clientes WHERE cedula = ? LIMIT 1', [cliente_cedula]);
-    if (cliRows.length > 0) {
-      id_cliente = cliRows[0].id_cliente;
-    } else {
-      const [cliRes] = await pool.query('INSERT INTO clientes (nombre, cedula, telefono, email) VALUES (?, ?, ?, ?)', [cliente_nombre, cliente_cedula, cliente_telefono || '', cliente_email || '']);
-      id_cliente = cliRes.insertId;
-    }
-
-    // 3. Registrar venta principal
-    const total_dolar = precioNum * cantidadNum;
-    const [ventaRes] = await pool.query('INSERT INTO ventas (fecha_hora, total_venta, tipo_pago, id_usuario, id_cliente) VALUES (NOW(), ?, ?, ?, ?)', [total_dolar, tipo_pago || 'Efectivo', req.session.user.id, id_cliente]);
-    const id_venta = ventaRes.insertId;
-
-    // 4. Registrar detalleventa y actualizar inventario
-    await pool.query('INSERT INTO detalleventa (id_venta, id_producto, id_talla, cantidad, precio_unitario) VALUES (?, ?, ?, ?, ?)', [id_venta, id_producto, id_talla, cantidadNum, precioNum]);
-    // calcular si la venta agotó la talla
-    const agotado = (disponible - cantidadNum) <= 0;
-    // actualizar inventario por talla (evitar negativos)
-    await pool.query('UPDATE inventario SET cantidad = GREATEST(0, cantidad - ?) WHERE id_producto = ? AND id_talla = ?', [cantidadNum, id_producto, id_talla]);
-    // actualizar stock total en productos (si existe columna inventario)
-    await pool.query('UPDATE productos SET inventario = GREATEST(0, inventario - ?) WHERE id_producto = ?', [cantidadNum, id_producto]);
-
-    res.json({ ok: true, id_venta, agotado });
+    const result = await procesarVenta(items, clienteData, tipo_pago || 'Efectivo', req.session.user.id);
+    res.json(Object.assign({ ok: true }, result));
   } catch (e) {
-    console.error('Error al registrar venta:', e.message);
-    res.status(500).json({ ok: false, message: 'Error al registrar venta' });
+    console.error('Error al registrar venta (with promos):', e.message || e);
+    res.status(500).json({ ok: false, message: e.message || 'Error al registrar venta' });
   }
 });
 
