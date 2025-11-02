@@ -1,0 +1,4 @@
+nohup: ignoring input
+Servidor escuchando en http://localhost:3000
+Advertencia al revisar esquema detallecompra: connect ECONNREFUSED 127.0.0.1:3306
+Advertencia al revisar esquema detalleventa/promociones: connect ECONNREFUSED 127.0.0.1:3306

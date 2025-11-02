@@ -258,9 +258,9 @@ async function procesarVenta(itemsInput, clienteData, tipo_pago, userId) {
       return;
     }
 
-    console.log('Esquema: columnas faltantes detectadas -> detalleventa:', needCols.join(', ') || 'ninguna', 'promociones:', needPromoCols.join(', ') || 'ninguna');
+  // columnas faltantes detectadas (silenciadas para no mostrar advertencias en inicio)
 
-    if (process.env.FORCE_SCHEMA_MIGRATE === '1' || process.env.ALLOW_DESTRUCTIVE_MIGRATIONS === '1') {
+  if (process.env.FORCE_SCHEMA_MIGRATE === '1' || process.env.ALLOW_DESTRUCTIVE_MIGRATIONS === '1') {
       // Ejecutar ALTER TABLE para agregar columnas faltantes (no destructivo)
       try {
         for (const c of needCols) {
@@ -289,15 +289,9 @@ async function procesarVenta(itemsInput, clienteData, tipo_pago, userId) {
         console.warn('Error aplicando migración de columnas extras:', e.message || e);
       }
     } else {
-      console.log('\nATENCIÓN: faltan columnas para soporte de promociones completas.');
-      if (needCols.length) console.log('Columnas faltantes en detalleventa:', needCols.join(', '));
-      if (needPromoCols.length) console.log('Columnas faltantes en promociones:', needPromoCols.join(', '));
-      console.log('Para crear automáticamente las columnas necesarias, arranca con:');
-      console.log('  FORCE_SCHEMA_MIGRATE=1 npm run start');
-      console.log('O ejecuta manualmente en la base de datos:');
-      needCols.forEach(c => console.log(`  ALTER TABLE detalleventa ADD COLUMN ${c} ${c.startsWith('id_') ? 'INT NULL' : 'DECIMAL(12,2) NOT NULL DEFAULT 0'};`));
-      needPromoCols.forEach(c => console.log(`  ALTER TABLE promociones ADD COLUMN ${c} INT NULL;`));
-      console.log('');
+      // No modificar la base de datos automáticamente. Mostrar mensaje informativo no intrusivo.
+      console.info('Esquema: faltan columnas opcionales para soporte completo de promociones. El servidor funcionará normalmente sin estas columnas.');
+      console.info('Si deseas crearlas más tarde, arranca el servidor con: FORCE_SCHEMA_MIGRATE=1 (asegúrate de tener un backup).');
     }
   } catch (e) {
     console.warn('Advertencia al revisar esquema detalleventa/promociones:', e.message || e);
