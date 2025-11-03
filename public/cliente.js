@@ -217,6 +217,18 @@ document.addEventListener('DOMContentLoaded', () => {
             const data = await res.json();
             if (adminProductos) {
                 todosLosProductos = data.productos || [];
+                // Asegurar que cada producto tenga el nombre de su categoría para mostrar en la lista
+                try {
+                    const cRes = await fetch('/api/categorias');
+                    const cData = await cRes.json();
+                    const cats = (cData && cData.categorias) ? cData.categorias : [];
+                    const catMap = {};
+                    cats.forEach(c => { catMap[c.id_categoria] = c.nombre; });
+                    todosLosProductos = todosLosProductos.map(p => (Object.assign({}, p, { categoria: p.id_categoria ? (catMap[p.id_categoria] || null) : null })));
+                } catch (e) {
+                    // si falla obtener categorías, seguimos mostrando sin nombre de categoría
+                    console.warn('No se pudo cargar nombres de categorías para productos:', e);
+                }
                 renderProductos(todosLosProductos);
             }
         } catch { 
@@ -773,12 +785,18 @@ document.addEventListener('DOMContentLoaded', () => {
         // Cargar productos disponibles en el select (CAJA) -> usar endpoint público /api/productos
         async function cargarProductosCaja() {
             try {
-                const res = await fetch('/api/productos');
+                const [res, cRes] = await Promise.all([fetch('/api/productos'), fetch('/api/categorias')]);
                 const data = await res.json();
+                const cData = await cRes.json();
+                const cats = (cData && cData.categorias) ? cData.categorias : [];
+                const catMap = {};
+                cats.forEach(c => { catMap[c.id_categoria] = c.nombre; });
                 productosDisponibles = data.productos || [];
                 selectProducto.innerHTML = '<option value="">Selecciona producto</option>';
                 productosDisponibles.forEach(prod => {
-                    selectProducto.innerHTML += `<option value="${prod.id_producto}" data-precio="${prod.precio_venta}" data-nombre="${prod.nombre}" data-marca="${prod.marca}">${prod.marca} - ${prod.nombre}</option>`;
+                    const catName = prod.id_categoria ? (catMap[prod.id_categoria] || '') : '';
+                    const label = `${prod.marca || ''} - ${prod.nombre}${catName ? ' | ' + catName : ''}`;
+                    selectProducto.innerHTML += `<option value="${prod.id_producto}" data-precio="${prod.precio_venta}" data-nombre="${prod.nombre}" data-marca="${prod.marca}">${label}</option>`;
                 });
             } catch {}
         }

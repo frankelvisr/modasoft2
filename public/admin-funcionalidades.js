@@ -112,15 +112,20 @@ async function cargarProveedoresCompra() {
 
 async function cargarProductosCompra() {
     try {
-        const res = await fetch('/api/admin/productos');
+        const [res, cRes] = await Promise.all([fetch('/api/admin/productos'), fetch('/api/categorias')]);
         const data = await res.json();
+        const cData = await cRes.json();
+        const cats = (cData && cData.categorias) ? cData.categorias : [];
+        const catMap = {};
+        cats.forEach(c => { catMap[c.id_categoria] = c.nombre; });
         const select = document.getElementById('compraProducto');
         if (select && data.productos) {
             select.innerHTML = '<option value="">Selecciona Producto</option>';
             data.productos.forEach(prod => {
                 const opt = document.createElement('option');
                 opt.value = prod.id_producto;
-                opt.textContent = `${prod.marca} - ${prod.nombre}`;
+                const catName = prod.id_categoria ? (catMap[prod.id_categoria] || '') : '';
+                opt.textContent = `${prod.marca || ''} - ${prod.nombre}${catName ? ' | ' + catName : ''}`;
                 select.appendChild(opt);
             });
         }
