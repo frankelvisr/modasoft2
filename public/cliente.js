@@ -249,10 +249,10 @@ document.addEventListener('DOMContentLoaded', () => {
             const div = document.createElement('div');
             div.className = 'item';
             div.dataset.id = prod.id_producto;
-            div.innerHTML = `
+                div.innerHTML = `
                 <div class="producto-info">
                     <strong>${prod.marca || ''} - ${prod.nombre}</strong><br>
-                    Categoría: ${prod.categoria || 'N/A'}<br>
+                    Categoría: <span id="prod-cat-${prod.id_producto}">${prod.categoria || (prod.id_categoria ? 'Cargando...' : 'Sin categoría')}</span><br>
                     Precio: $${prod.precio_venta || '0.00'} | Stock: ${prod.inventario || 0}
                 </div>
                 <div class="actions">
@@ -260,6 +260,23 @@ document.addEventListener('DOMContentLoaded', () => {
                     <button class="btn btn-small secondary" onclick="eliminarProducto(${prod.id_producto})">Eliminar</button>
                 </div>`;
             adminProductos.appendChild(div);
+            // Si tenemos id_categoria pero no nombre resuelto, intentar obtenerlo en segundo plano
+            if (!prod.categoria && prod.id_categoria) {
+                (async () => {
+                    try {
+                        const res = await fetch('/api/categorias');
+                        if (!res.ok) return;
+                        const data = await res.json();
+                        const cats = data.categorias || [];
+                        const found = cats.find(c => Number(c.id_categoria) === Number(prod.id_categoria));
+                        const span = document.getElementById(`prod-cat-${prod.id_producto}`);
+                        if (span) span.textContent = found ? found.nombre : 'Sin categoría';
+                    } catch (e) {
+                        const span = document.getElementById(`prod-cat-${prod.id_producto}`);
+                        if (span) span.textContent = 'Sin categoría';
+                    }
+                })();
+            }
         });
     }
     

@@ -927,7 +927,8 @@ app.delete('/api/admin/productos/:id', requiereRol('administrador'), async (req,
 app.get('/api/admin/productos', requiereRol('administrador'), async (req, res) => {
   const { q } = req.query;
   try {
-  let query = 'SELECT id_producto, nombre, marca, inventario, precio_venta FROM productos';
+  // Incluir id_categoria para que el frontend admin pueda mostrar el nombre de la categoría
+  let query = 'SELECT id_producto, nombre, marca, inventario, precio_venta, id_categoria FROM productos';
     let params = [];
     if (q) {
       query += ' WHERE nombre LIKE ?';
