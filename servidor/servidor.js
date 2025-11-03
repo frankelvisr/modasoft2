@@ -1207,7 +1207,8 @@ app.post('/api/ventas', requiereRol('caja'), async (req, res) => {
 // Listado de productos (para Caja) -> incluye tallas y cantidades
 app.get('/api/productos', requiereRol('cualquiera'), async (req, res) => {
   try {
-    const [rows] = await pool.query('SELECT id_producto, nombre, marca, inventario, precio_venta FROM productos LIMIT 500');
+    // Incluir id_categoria para que la Caja pueda evaluar promociones por categoría
+    const [rows] = await pool.query('SELECT id_producto, nombre, marca, inventario, precio_venta, id_categoria FROM productos LIMIT 500');
     // Obtener tallas por producto
     for (const prod of rows) {
       const [tallas] = await pool.query(
@@ -1227,7 +1228,8 @@ app.get('/api/productos', requiereRol('cualquiera'), async (req, res) => {
 app.get('/api/productos/:id', requiereRol('cualquiera'), async (req, res) => {
   const id = req.params.id;
   try {
-    const [rows] = await pool.query('SELECT id_producto, nombre, marca, inventario, precio_venta FROM productos WHERE id_producto = ? LIMIT 1', [id]);
+    // Incluir id_categoria para que la caja/cliente puedan conocer la categoría del producto
+    const [rows] = await pool.query('SELECT id_producto, nombre, marca, inventario, precio_venta, id_categoria FROM productos WHERE id_producto = ? LIMIT 1', [id]);
     if (rows.length === 0) return res.json({ producto: null });
     const prod = rows[0];
     const [tallas] = await pool.query(

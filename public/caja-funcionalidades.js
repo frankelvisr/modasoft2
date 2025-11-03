@@ -42,6 +42,25 @@ async function loadProductosForCaja() {
   }
 }
 
+// Si un producto no trae id_categoria en la lista inicial, intentar obtener detalle del producto
+async function ensureProductoTieneCategoria(prod) {
+  if (!prod || prod.id_categoria !== undefined && prod.id_categoria !== null) return prod;
+  try {
+    const res = await fetch(`/api/productos/${encodeURIComponent(prod.id_producto)}`);
+    if (!res.ok) return prod;
+    const json = await res.json();
+    if (json && json.producto) {
+      prod.id_categoria = json.producto.id_categoria || null;
+      // también actualizar el cache global
+      const idx = productosCache.findIndex(p => p.id_producto === prod.id_producto);
+      if (idx >= 0) productosCache[idx] = Object.assign(productosCache[idx] || {}, prod);
+    }
+  } catch (e) {
+    console.warn('No se pudo obtener detalle de producto para categoría:', e && e.message ? e.message : e);
+  }
+  return prod;
+}
+
 async function loadPromociones() {
   try {
     const res = await fetch('/api/promociones/activas');
@@ -73,10 +92,12 @@ function clearNotification() {
   container.innerHTML = '';
 }
 
-function onProductoChange() {
+async function onProductoChange() {
   const pid = document.getElementById('ventaProducto').value;
   const prod = productosCache.find(p => String(p.id_producto) === String(pid));
   if (prod) {
+    // Asegurar que el producto tenga id_categoria para las promos
+    await ensureProductoTieneCategoria(prod);
     document.getElementById('ventaPrecioUnitario').value = parseFloat(prod.precio_venta || 0).toFixed(2);
     const tallaSel = document.getElementById('ventaTalla');
     tallaSel.innerHTML = '<option value="">Selecciona talla</option>';
@@ -101,8 +122,14 @@ async function onAgregarAlCarrito() {
   const cantidad = parseInt(document.getElementById('ventaCantidad').value || 0);
   const precio_unitario = parseFloat(document.getElementById('ventaPrecioUnitario').value || 0) || 0;
   if (!id_producto || !cantidad || cantidad <= 0) { alert('Selecciona producto y cantidad válida'); return; }
-  const prod = productosCache.find(p => String(p.id_producto) === String(id_producto));
-  cajaCart.push({ id_producto: Number(id_producto), id_talla: id_talla ? Number(id_talla) : null, cantidad, precio_unitario, nombre: prod ? (prod.nombre || prod.marca) : 'Producto', no_aplicar_promocion: false, force_promotion_id: null });
+  let prod = productosCache.find(p => String(p.id_producto) === String(id_producto));
+  // Si el producto no tiene categoría en cache, solicitar su detalle antes de añadir
+  if (prod && (prod.id_categoria === undefined || prod.id_categoria === null)) {
+    await ensureProductoTieneCategoria(prod).catch(()=>{});
+    // refrescar referencia
+    prod = productosCache.find(p => String(p.id_producto) === String(id_producto));
+  }
+  cajaCart.push({ id_producto: Number(id_producto), id_talla: id_talla ? Number(id_talla) : null, cantidad, precio_unitario, nombre: prod ? (prod.nombre || prod.marca) : 'Producto', id_categoria: prod ? (prod.id_categoria || null) : null, no_aplicar_promocion: false, force_promotion_id: null });
   // Asegurar que promociones estén cargadas antes de renderizar
   if (!promocionesCache || promocionesCache.length === 0) {
     await loadPromociones().catch(()=>{});
@@ -120,6 +147,7 @@ function aplicarMejorPromocion(item) {
     } catch (e) { return true; }
   });
   const prodInfo = productosCache.find(p => p.id_producto === item.id_producto) || {};
+  const prodCat = item.id_categoria || prodInfo.id_categoria || null;
   let mejor = { descuento: 0, promo: null, detalle: null };
   const subtotal = item.precio_unitario * item.cantidad;
   const subtotalCarrito = cajaCart.reduce((s,it)=>s + (it.precio_unitario * it.cantidad), 0);
@@ -130,32 +158,39 @@ function aplicarMejorPromocion(item) {
   if (item.force_promotion_id) {
     const forced = pAplicables.find(pp => Number(pp.id_promocion) === Number(item.force_promotion_id));
     if (forced) {
-      // aplicar la promoción forzada (reutilizar la lógica de cálculo)
-      const p = forced;
-      let descuentoForced = 0;
-      if (p.tipo_promocion === 'DESCUENTO_PORCENTAJE') {
-        descuentoForced = subtotal * (Number(p.valor || 0) / 100);
-      } else if (p.tipo_promocion === 'DESCUENTO_FIJO') {
-        const val = Number(p.valor || 0);
-        if (p.id_producto || p.id_categoria) descuentoForced = item.cantidad * val;
-        else descuentoForced = subtotalCarrito > 0 ? (subtotal / subtotalCarrito) * val : 0;
-      } else if (p.tipo_promocion === 'COMPRA_X_LLEVA_Y') {
-        const paramX = Number(p.param_x || 0);
-        const paramY = Number(p.param_y || 0);
-        if (paramX > 0 && paramY >= 0) {
-          const bloque = paramX + paramY;
-          const completos = Math.floor(item.cantidad / bloque);
-          const gratis = completos * paramY;
-          descuentoForced = gratis * item.precio_unitario;
+      // Verificar aplicabilidad por producto/categoría antes de forzar
+      if (forced.id_producto && Number(forced.id_producto) !== Number(item.id_producto)) {
+        // no aplicable, caerá al flujo normal
+      } else if (forced.id_categoria && (!prodCat || Number(forced.id_categoria) !== Number(prodCat))) {
+        // no aplicable por categoría
+      } else {
+        // aplicar la promoción forzada (reutilizar la lógica de cálculo)
+        const p = forced;
+        let descuentoForced = 0;
+        if (p.tipo_promocion === 'DESCUENTO_PORCENTAJE') {
+          descuentoForced = subtotal * (Number(p.valor || 0) / 100);
+        } else if (p.tipo_promocion === 'DESCUENTO_FIJO') {
+          const val = Number(p.valor || 0);
+          if (p.id_producto || p.id_categoria) descuentoForced = item.cantidad * val;
+          else descuentoForced = subtotalCarrito > 0 ? (subtotal / subtotalCarrito) * val : 0;
+        } else if (p.tipo_promocion === 'COMPRA_X_LLEVA_Y') {
+          const paramX = Number(p.param_x || 0);
+          const paramY = Number(p.param_y || 0);
+          if (paramX > 0 && paramY >= 0) {
+            const bloque = paramX + paramY;
+            const completos = Math.floor(item.cantidad / bloque);
+            const gratis = completos * paramY;
+            descuentoForced = gratis * item.precio_unitario;
+          }
         }
+        return { descuento: descuentoForced, promo: p, detalle: { subtotal } };
       }
-      return { descuento: descuentoForced, promo: p, detalle: { subtotal } };
     }
   }
 
   for (const p of pAplicables) {
-    if (p.id_producto && Number(p.id_producto) !== Number(item.id_producto)) continue;
-    if (p.id_categoria && Number(p.id_categoria) !== Number(prodInfo.id_categoria)) continue;
+  if (p.id_producto && Number(p.id_producto) !== Number(item.id_producto)) continue;
+  if (p.id_categoria && Number(p.id_categoria) !== Number(prodCat)) continue;
     const minimo = Number(p.minimo_compra || 0);
     if (minimo > 0) {
       const scope = (p.id_producto || p.id_categoria) ? subtotal : subtotalCarrito;
