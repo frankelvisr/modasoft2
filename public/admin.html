@@ -1191,6 +1191,12 @@
                             </select>
                         </div>
                         <div class="col">
+                            <label>Producto (opcional)</label>
+                            <select id="promoProducto" class="input">
+                                <option value="">Selecciona producto (opcional)</option>
+                            </select>
+                        </div>
+                        <div class="col">
                             <label>Monto Mínimo de Compra</label>
                             <input type="number" id="promoMinimoCompra" class="input" step="0.01" value="0">
                         </div>
@@ -1202,7 +1208,12 @@
                         </div>
                     </div>
                     <div class="row form-row">
-                        <button type="submit" class="btn primary">Crear Promoción</button>
+                        <div class="col">
+                            <label><input type="checkbox" id="promoActiva" checked> Activa</label>
+                        </div>
+                        <div class="col" style="flex:0 0 auto;">
+                            <button type="submit" id="promoSubmitBtn" class="btn primary">Crear Promoción</button>
+                        </div>
                     </div>
                 </form>
                 <div class="row header-row">

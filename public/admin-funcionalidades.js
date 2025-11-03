@@ -43,6 +43,8 @@ document.addEventListener('DOMContentLoaded', function() {
     // Gestión de promociones
     if (document.getElementById('form-promocion')) {
         document.getElementById('form-promocion').addEventListener('submit', crearPromocion);
+        // Cargar opciones (categorías y productos) y luego la lista de promociones
+        cargarOpcionesPromocionForm();
         cargarPromociones();
     }
 
@@ -351,33 +353,80 @@ window.verHistorialCliente = async function(id_cliente, nombre, cedula) {
 async function crearPromocion(e) {
     e.preventDefault();
     try {
-        const res = await fetch('/api/promociones', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                nombre: document.getElementById('promoNombre').value,
-                tipo_promocion: document.getElementById('promoTipo').value,
-                valor: parseFloat(document.getElementById('promoValor').value),
-                fecha_inicio: document.getElementById('promoFechaInicio').value,
-                fecha_fin: document.getElementById('promoFechaFin').value,
-                id_categoria: document.getElementById('promoAplicarA').value || null,
-                minimo_compra: parseFloat(document.getElementById('promoMinimoCompra').value),
-                param_x: document.getElementById('promoParamX') ? parseInt(document.getElementById('promoParamX').value) || null : null,
-                param_y: document.getElementById('promoParamY') ? parseInt(document.getElementById('promoParamY').value) || null : null,
-                descripcion: document.getElementById('promoDescripcion') ? document.getElementById('promoDescripcion').value : null
-            })
-        });
+        // Support for editing existing promotion
+        const payload = {
+            nombre: document.getElementById('promoNombre').value,
+            tipo_promocion: document.getElementById('promoTipo').value,
+            valor: parseFloat(document.getElementById('promoValor').value) || 0,
+            fecha_inicio: document.getElementById('promoFechaInicio').value,
+            fecha_fin: document.getElementById('promoFechaFin').value,
+            id_categoria: document.getElementById('promoAplicarA').value || null,
+            id_producto: document.getElementById('promoProducto') ? (document.getElementById('promoProducto').value || null) : null,
+            minimo_compra: parseFloat(document.getElementById('promoMinimoCompra').value) || 0,
+            param_x: document.getElementById('promoParamX') ? parseInt(document.getElementById('promoParamX').value) || null : null,
+            param_y: document.getElementById('promoParamY') ? parseInt(document.getElementById('promoParamY').value) || null : null,
+            descripcion: document.getElementById('promoDescripcion') ? document.getElementById('promoDescripcion').value : null,
+            activa: document.getElementById('promoActiva') ? !!document.getElementById('promoActiva').checked : true
+        };
 
-        const data = await res.json();
-        if (data.ok) {
-            alert('Promoción creada correctamente');
-            e.target.reset();
-            cargarPromociones();
+        // If editing, use PUT to update
+        if (window.__editingPromoId) {
+            const res = await fetch(`/api/promociones/${window.__editingPromoId}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            const data = await res.json();
+            if (data.ok) {
+                alert('Promoción actualizada correctamente');
+                window.__editingPromoId = null;
+                document.getElementById('form-promocion').reset();
+                document.getElementById('promoSubmitBtn') && (document.getElementById('promoSubmitBtn').textContent = 'Crear');
+                cargarPromociones();
+            } else {
+                alert('Error al actualizar: ' + (data.message || data.error || ''));
+            }
         } else {
-            alert('Error: ' + (data.error || ''));
+            const res = await fetch('/api/promociones', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            const data = await res.json();
+            if (data.ok) {
+                alert('Promoción creada correctamente');
+                e.target.reset();
+                cargarPromociones();
+            } else {
+                alert('Error: ' + (data.error || data.message || ''));
+            }
         }
     } catch (error) {
         alert('Error de conexión');
+    }
+}
+
+// Helper: cargar opciones del formulario (categorías y productos)
+let __categoriasCache = [];
+let __productosCache = [];
+async function cargarOpcionesPromocionForm() {
+    try {
+        const [cRes, pRes] = await Promise.all([fetch('/api/categorias'), fetch('/api/admin/productos')]);
+        const cats = await cRes.json();
+        const prods = await pRes.json();
+        const selCat = document.getElementById('promoAplicarA');
+        const selProd = document.getElementById('promoProducto');
+        __categoriasCache = (cats && cats.categorias) ? cats.categorias : [];
+        __productosCache = (prods && prods.productos) ? prods.productos : [];
+
+        if (selCat) {
+            selCat.innerHTML = '<option value="">Todas las categorías</option>' + __categoriasCache.map(c => `<option value="${c.id_categoria}">${c.nombre}</option>`).join('');
+        }
+        if (selProd) {
+            selProd.innerHTML = '<option value="">Selecciona producto (opcional)</option>' + __productosCache.map(p => `<option value="${p.id_producto}">${(p.marca? p.marca + ' - ' : '') + p.nombre}</option>`).join('');
+        }
+    } catch (e) {
+        console.error('Error cargando opciones promocion form:', e);
     }
 }
 
@@ -387,24 +436,93 @@ async function cargarPromociones() {
         const data = await res.json();
         const lista = document.getElementById('listaPromociones');
         if (lista && data.promociones) {
-            lista.innerHTML = data.promociones.map(promo => `
+            // Mostrar nombre de categoría/producto y estado "activo" calculado por fecha
+            const today = new Date().toISOString().slice(0,10);
+            lista.innerHTML = data.promociones.map(promo => {
+                const cat = __categoriasCache.find(c => String(c.id_categoria) === String(promo.id_categoria));
+                const prod = __productosCache.find(pp => String(pp.id_producto) === String(promo.id_producto));
+                const dentroPeriodo = (promo.fecha_inicio && promo.fecha_fin && promo.fecha_inicio <= today && promo.fecha_fin >= today);
+                const estaActivo = promo.activa && dentroPeriodo;
+                return `
                 <div class="item">
                     <div>
                         <strong>${promo.nombre}</strong><br>
                         Tipo: ${promo.tipo_promocion} | Valor: ${promo.valor} | 
                         ${promo.fecha_inicio} - ${promo.fecha_fin} | 
-                        ${promo.activa ? 'Activa' : 'Inactiva'}
+                        ${estaActivo ? 'Activo' : 'Inactivo'}
+                        <div style="font-size:0.9em;color:var(--text-muted);">Aplicar a: ${cat ? cat.nombre : 'Todas las categorías'}${prod ? ' / Producto: ' + prod.nombre : ''}</div>
                     </div>
                     <div class="actions">
                         <button class="btn btn-small" onclick="editarPromocion(${promo.id_promocion})">Editar</button>
-                        <button class="btn btn-small secondary" onclick="desactivarPromocion(${promo.id_promocion})">Desactivar</button>
+                        <button class="btn btn-small secondary" onclick="desactivarPromocion(${promo.id_promocion})">${promo.activa ? 'Desactivar' : 'Activar'}</button>
+                        <button class="btn btn-small danger" onclick="eliminarPromocion(${promo.id_promocion})">Eliminar</button>
                     </div>
                 </div>
-            `).join('');
+            `}).join('');
         }
     } catch (error) {
         console.error('Error cargando promociones:', error);
     }
+}
+
+// Editar: poblar formulario con los datos de la promoción
+window.editarPromocion = async function(id) {
+    try {
+        const res = await fetch('/api/promociones');
+        const data = await res.json();
+        const promo = (data.promociones || []).find(p => Number(p.id_promocion) === Number(id));
+        if (!promo) return alert('Promoción no encontrada');
+        // Poblar formulario
+        document.getElementById('promoNombre').value = promo.nombre || '';
+        document.getElementById('promoTipo').value = promo.tipo_promocion || '';
+        document.getElementById('promoValor').value = promo.valor || '';
+        document.getElementById('promoFechaInicio').value = promo.fecha_inicio || '';
+        document.getElementById('promoFechaFin').value = promo.fecha_fin || '';
+        document.getElementById('promoAplicarA').value = promo.id_categoria || '';
+        if (document.getElementById('promoProducto')) document.getElementById('promoProducto').value = promo.id_producto || '';
+        document.getElementById('promoMinimoCompra').value = promo.minimo_compra || '';
+        if (document.getElementById('promoParamX')) document.getElementById('promoParamX').value = promo.param_x || '';
+        if (document.getElementById('promoParamY')) document.getElementById('promoParamY').value = promo.param_y || '';
+        if (document.getElementById('promoDescripcion')) document.getElementById('promoDescripcion').value = promo.descripcion || '';
+        if (document.getElementById('promoActiva')) document.getElementById('promoActiva').checked = !!promo.activa;
+        window.__editingPromoId = promo.id_promocion;
+        document.getElementById('promoSubmitBtn') && (document.getElementById('promoSubmitBtn').textContent = 'Actualizar');
+        // Scroll al formulario
+        document.getElementById('promoNombre').scrollIntoView({ behavior: 'smooth', block: 'center' });
+    } catch (e) {
+        console.error('Error editarPromocion:', e);
+        alert('Error al cargar promoción para editar');
+    }
+}
+
+window.desactivarPromocion = async function(id) {
+    try {
+        // Obtener la promoción actual para conocer su estado y datos
+        const res = await fetch('/api/promociones');
+        const data = await res.json();
+        const promo = (data.promociones || []).find(p => Number(p.id_promocion) === Number(id));
+        if (!promo) return alert('Promoción no encontrada');
+        const payload = Object.assign({}, promo, { activa: promo.activa ? 0 : 1 });
+        // Normalizar payload: server espera campos específicos
+        const update = {
+            nombre: payload.nombre, descripcion: payload.descripcion, tipo_promocion: payload.tipo_promocion,
+            valor: payload.valor, fecha_inicio: payload.fecha_inicio, fecha_fin: payload.fecha_fin,
+            activa: payload.activa, id_categoria: payload.id_categoria || null, id_producto: payload.id_producto || null,
+            minimo_compra: payload.minimo_compra || 0, param_x: payload.param_x || null, param_y: payload.param_y || null
+        };
+        const put = await fetch(`/api/promociones/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(update) });
+        const r = await put.json();
+        if (r.ok) cargarPromociones(); else alert('No se pudo cambiar estado');
+    } catch (e) { console.error('Error activar/desactivar promo:', e); alert('Error al cambiar estado'); }
+}
+
+window.eliminarPromocion = async function(id) {
+    if (!confirm('¿Eliminar esta promoción? Esta acción es irreversible.')) return;
+    try {
+        const res = await fetch(`/api/promociones/${id}`, { method: 'DELETE' });
+        const data = await res.json();
+        if (data.ok) cargarPromociones(); else alert('No se pudo eliminar: ' + (data.message || ''));
+    } catch (e) { console.error('Error eliminar promocion:', e); alert('Error al eliminar'); }
 }
 
 // ==================== FUNCIONES DE CONTABILIDAD ====================

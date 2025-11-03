@@ -962,3 +962,59 @@ ALTER TABLE promociones
   ADD INDEX IF NOT EXISTS idx_promociones_fecha (fecha_inicio, fecha_fin);
 
 -- Fin de las extensiones para promociones avanzadas
+
+-- -------------------------------------------------------------------------
+-- Opcional: agregar columna producto_nombre en detalleventa y trigger
+-- Esto es útil para mantener el nombre del producto en el detalle en el momento
+-- de la venta (histórico), evitando joins costosos en reportes.
+-- Ejecuta sólo si quieres esta copia denormalizada.
+-- -------------------------------------------------------------------------
+
+ALTER TABLE detalleventa
+  ADD COLUMN IF NOT EXISTS producto_nombre VARCHAR(255) NULL;
+
+-- Crear trigger para rellenar producto_nombre al insertar en detalleventa
+-- Nota: requiere privilegios para crear triggers. Si tu servidor no permite
+-- DELIMITER en este contexto, ejecuta las siguientes líneas directamente
+-- desde un cliente MySQL (phpMyAdmin o CLI).
+
+-- START TRIGGER (ejecutar en cliente que soporte delimitadores)
+-- DELIMITER $$
+-- CREATE TRIGGER trg_detalleventa_before_insert
+-- BEFORE INSERT ON detalleventa
+-- FOR EACH ROW
+-- BEGIN
+--   IF NEW.producto_nombre IS NULL OR NEW.producto_nombre = '' THEN
+--     DECLARE _nombre VARCHAR(255);
+--     SELECT nombre INTO _nombre FROM productos WHERE id_producto = NEW.id_producto LIMIT 1;
+--     SET NEW.producto_nombre = _nombre;
+--   END IF;
+-- END$$
+-- DELIMITER ;
+-- END TRIGGER
+
+-- -------------------------------------------------------------------------
+-- Ejemplos de datos de prueba (usar sólo en entorno de pruebas)
+-- -------------------------------------------------------------------------
+-- 1) Promoción 10% global válida 30 días
+-- INSERT INTO promociones (nombre, descripcion, tipo_promocion, valor, fecha_inicio, fecha_fin, activa, id_categoria, id_producto, minimo_compra, param_x, param_y)
+-- VALUES ('Test 10% Global', 'Descuento 10% para pruebas', 'DESCUENTO_PORCENTAJE', 10, CURDATE(), DATE_ADD(CURDATE(), INTERVAL 30 DAY), 1, NULL, NULL, 0, NULL, NULL);
+
+-- 2) Promoción Compra 2 Lleva 1 para producto ejemplo (reemplaza 23 por id real)
+-- INSERT INTO promociones (nombre, descripcion, tipo_promocion, valor, fecha_inicio, fecha_fin, activa, id_categoria, id_producto, minimo_compra, param_x, param_y)
+-- VALUES ('Compra 2 Lleva 1 Test', 'Compra 2 y llévate 1 gratis en producto 23', 'COMPRA_X_LLEVA_Y', 0, CURDATE(), DATE_ADD(CURDATE(), INTERVAL 30 DAY), 1, NULL, 23, 0, 2, 1);
+
+-- 3) Ejemplo manual de venta y detalle (solo para pruebas manuales):
+-- INSERT INTO ventas (fecha_hora, total_venta, tipo_pago, id_usuario, id_cliente) VALUES (NOW(), 100.00, 'Efectivo', 1, NULL);
+-- -- Reemplaza 999 por el id_venta generado
+-- INSERT INTO detalleventa (id_venta, id_producto, id_talla, cantidad, precio_unitario, id_promocion_aplicada, descuento_unitario, descuento_total, producto_nombre)
+-- VALUES (999, 23, NULL, 3, 10.00, 1, 1.00, 3.00, 'Nombre producto 23');
+
+-- -------------------------------------------------------------------------
+-- Notas de ejecución segura:
+-- 1) Haz backup antes de aplicar: mysqldump -u <user> -p <db> > backup.sql
+-- 2) Revisa columnas existentes:
+--    SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'detalleventa';
+-- 3) Ejecuta ALTERs uno a uno si tu servidor no soporta IF NOT EXISTS.
+-- 4) Para crear el trigger, usa un cliente que soporte delimitadores (phpMyAdmin o CLI).
+-- -------------------------------------------------------------------------
