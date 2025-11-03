@@ -556,6 +556,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const inputTelefono = document.getElementById('ventaClienteTelefono');
     const inputEmail = document.getElementById('ventaClienteEmail');
     const selectProducto = document.getElementById('ventaProducto');
+    const selectCategoria = document.getElementById('ventaCategoria');
     const selectTalla = document.getElementById('ventaTalla');
     const inputCantidad = document.getElementById('ventaCantidad');
     const inputPrecioUnitario = document.getElementById('ventaPrecioUnitario');
@@ -568,6 +569,8 @@ document.addEventListener('DOMContentLoaded', () => {
     
     let carrito = [];
     let productosDisponibles = []; // CORRECCIÓN 2: Declaración de la variable
+    let categoriasDisponibles = [];
+    let categoriaMap = {};
 
     /**
      * Función reutilizable para cerrar la sesión.
@@ -806,14 +809,23 @@ document.addEventListener('DOMContentLoaded', () => {
                 const data = await res.json();
                 const cData = await cRes.json();
                 const cats = (cData && cData.categorias) ? cData.categorias : [];
-                const catMap = {};
-                cats.forEach(c => { catMap[c.id_categoria] = c.nombre; });
+                categoriasDisponibles = cats;
+                categoriaMap = {};
+                cats.forEach(c => { categoriaMap[c.id_categoria] = c.nombre; });
                 productosDisponibles = data.productos || [];
                 selectProducto.innerHTML = '<option value="">Selecciona producto</option>';
+                // Llenar select de categorías global para el cajero
+                if (selectCategoria) {
+                    selectCategoria.innerHTML = '<option value="">Selecciona categoría</option>';
+                    cats.forEach(c => {
+                        selectCategoria.innerHTML += `<option value="${c.id_categoria}">${c.nombre}</option>`;
+                    });
+                }
                 productosDisponibles.forEach(prod => {
-                    const catName = prod.id_categoria ? (catMap[prod.id_categoria] || '') : '';
+                    const catName = prod.id_categoria ? (categoriaMap[prod.id_categoria] || '') : '';
                     const label = `${prod.marca || ''} - ${prod.nombre}${catName ? ' | ' + catName : ''}`;
-                    selectProducto.innerHTML += `<option value="${prod.id_producto}" data-precio="${prod.precio_venta}" data-nombre="${prod.nombre}" data-marca="${prod.marca}">${label}</option>`;
+                    // incluir data-cat para facilitar preselección
+                    selectProducto.innerHTML += `<option value="${prod.id_producto}" data-precio="${prod.precio_venta}" data-nombre="${prod.nombre}" data-marca="${prod.marca}" data-cat="${prod.id_categoria || ''}">${label}</option>`;
                 });
             } catch {}
         }
@@ -829,6 +841,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 // Actualizar tallas disponibles según el producto (usa endpoint caja público)
                 const idProd = option.value;
                 cargarTallasPorProducto(idProd);
+                // Preseleccionar categoría del producto si está disponible
+                try {
+                    const prodCat = option.getAttribute('data-cat');
+                    if (selectCategoria) {
+                        if (prodCat) selectCategoria.value = prodCat;
+                        else selectCategoria.value = '';
+                    }
+                } catch (e) {}
             } else {
                 inputPrecioUnitario.value = '';
                 document.getElementById('ventaPrecioUnitarioBs').value = '';
@@ -862,6 +882,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const optProd = selectProducto.selectedOptions[0];
             const nombreProd = optProd ? optProd.getAttribute('data-nombre') : '';
             const marcaProd = optProd ? optProd.getAttribute('data-marca') : '';
+            const idCategoriaSeleccionada = selectCategoria ? (selectCategoria.value || null) : null;
             const nombreTalla = optTalla ? optTalla.textContent.replace(/\s*\(\d+\s+disponibles\)/, '').trim() : '';
             const cantidadVal = parseInt(inputCantidad.value) || 0;
             const maxCant = optTalla ? parseInt(optTalla.getAttribute('data-cantidad')) : 0;
@@ -879,12 +900,13 @@ document.addEventListener('DOMContentLoaded', () => {
                 alert(`Cantidad solicitada (${cantidadVal}) supera el stock disponible (${maxCant}).`);
                 return;
             }
-            // Incluir idProd e idTalla en el carrito
-            carrito.push({ idProd, nombreProd, marcaProd, idTalla, nombreTalla, cantidad: cantidadVal, precio });
+            // Incluir idProd, idTalla e idCategoria en el carrito
+            carrito.push({ idProd, nombreProd, marcaProd, idTalla, nombreTalla, cantidad: cantidadVal, precio, idCategoria: idCategoriaSeleccionada });
             renderCarrito();
             // Limpiar campos
             selectProducto.value = '';
             selectTalla.innerHTML = '<option value="">Selecciona talla</option>';
+            if (selectCategoria) selectCategoria.value = '';
             inputCantidad.value = '';
             inputPrecioUnitario.value = '';
             if (document.getElementById('ventaPrecioUnitarioBs')) document.getElementById('ventaPrecioUnitarioBs').value = '';
@@ -902,7 +924,9 @@ document.addEventListener('DOMContentLoaded', () => {
             carrito.forEach((item, idx) => {
                 const totalItem = item.precio * item.cantidad;
                 subtotal += totalItem;
-                ventaDetalle.innerHTML += `<div class="item">${item.marcaProd} - ${item.nombreProd} - ${item.nombreTalla} x${item.cantidad} ($${totalItem.toFixed(2)}) <button class='btn danger' style='background:#ef4444;color:#fff;margin-left:10px;' onclick='eliminarDelCarrito(${idx})'>Eliminar</button></div>`;
+                const catName = item.idCategoria ? (categoriaMap[item.idCategoria] || '') : '';
+                const catLabel = catName ? ` | Categoria: ${catName}` : '';
+                ventaDetalle.innerHTML += `<div class="item">${item.marcaProd} - ${item.nombreProd}${catLabel} - ${item.nombreTalla} x${item.cantidad} ($${totalItem.toFixed(2)}) <button class='btn danger' style='background:#ef4444;color:#fff;margin-left:10px;' onclick='eliminarDelCarrito(${idx})'>Eliminar</button></div>`;
             });
             ventaDetalle.innerHTML += `<div class="item" style="border-top: 1px solid #ccc; margin-top: 10px; padding-top: 10px;"><b>Total Carrito: $${subtotal.toFixed(2)}</b></div>`;
         }
@@ -964,6 +988,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     id_talla: item.idTalla,
                     cantidad: item.cantidad,
                     precio_unitario: item.precio,
+                    idCategoria: item.idCategoria || null,
                     tipo_pago
                 };
                 try {

@@ -125,7 +125,10 @@ async function procesarVenta(itemsInput, clienteData, tipo_pago, userId) {
     precio_unitario: Number(it.precio_unitario) || 0,
     // Opciones opcionales del cliente/cajero
     no_aplicar_promocion: !!it.no_aplicar_promocion,
-    force_promotion_id: it.force_promotion_id ? Number(it.force_promotion_id) : null
+    force_promotion_id: it.force_promotion_id ? Number(it.force_promotion_id) : null,
+    // El front puede enviar idCategoria (ventaCategoria) para ayudar en matching de promociones.
+    // Por seguridad, el servidor solo usará este valor como fallback si el producto no tiene categoría.
+    preferred_id_categoria: it.idCategoria ? Number(it.idCategoria) : (it.id_categoria ? Number(it.id_categoria) : null)
   }));
 
   // 1) Verificar stock
@@ -165,6 +168,28 @@ async function procesarVenta(itemsInput, clienteData, tipo_pago, userId) {
   const [productosInfo] = await pool.query(`SELECT id_producto, id_categoria, precio_venta FROM productos WHERE id_producto IN (${prodIds.map(_=>'?').join(',')})`, prodIds);
   const prodMap = {};
   productosInfo.forEach(p => { prodMap[p.id_producto] = p; });
+
+  // Si el cajero envió una categoría preferida para una línea y el producto no tiene categoría,
+  // podemos usar esa preferencia como fallback para la evaluación de promociones.
+  // Solo aplicamos el fallback si la categoría existe en la tabla `categorias`.
+  try {
+    const preferredCats = [...new Set(items.map(it => it.preferred_id_categoria).filter(Boolean))];
+    if (preferredCats.length > 0) {
+      const [existingCats] = await pool.query(`SELECT id_categoria FROM categorias WHERE id_categoria IN (${preferredCats.map(_=>'?').join(',')})`, preferredCats);
+      const existingSet = new Set(existingCats.map(c => Number(c.id_categoria)));
+      // Aplicar fallback por producto si no tiene id_categoria
+      for (const it of items) {
+        if (!prodMap[it.id_producto]) continue;
+        if ((!prodMap[it.id_producto].id_categoria || prodMap[it.id_producto].id_categoria === null) && it.preferred_id_categoria && existingSet.has(Number(it.preferred_id_categoria))) {
+          // Solo modificar en memoria para uso en matching; no alteramos la base de datos aquí.
+          prodMap[it.id_producto].id_categoria = Number(it.preferred_id_categoria);
+        }
+      }
+    }
+  } catch (e) {
+    // No fatal: si falla esta verificación, seguimos con la lógica normal sin fallback.
+    console.warn('No se pudo validar categorías preferidas proporcionadas por la caja:', e.message || e);
+  }
 
   // 5) Calcular descuentos
   const descuentosPorItem = [];
