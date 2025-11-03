@@ -3,21 +3,23 @@ let cajaCart = [];
 let productosCache = [];
 let promocionesCache = [];
 
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
   if (document.getElementById('ventaProducto')) {
-    loadProductosForCaja();
-    loadPromociones();
+    // Cargar productos y promociones de forma automática y esperar a que terminen
+    try {
+      await Promise.all([loadProductosForCaja(), loadPromociones()]);
+    } catch (e) {
+      console.error('Error inicializando productos/promociones:', e);
+      // intentar cargar individualmente si Promise.all falló
+      await loadProductosForCaja().catch(()=>{});
+      await loadPromociones().catch(()=>{});
+    }
 
+    // Listeners
     document.getElementById('btnAgregarProducto').addEventListener('click', onAgregarAlCarrito);
     document.getElementById('btnPagarVenta').addEventListener('click', onPagarVenta);
-    // Botón para recargar promociones manualmente
-    const btnRecargar = document.getElementById('btnRecargarPromos');
-    if (btnRecargar) btnRecargar.addEventListener('click', async () => {
-      showNotification('Recargando promociones...', 'info');
-      await loadPromociones();
-      renderCart();
-      showNotification('Promociones recargadas.', 'info', 3000);
-    });
+    // Render inicial del carrito (si hay items previos)
+    renderCart();
   }
 });
 
@@ -43,12 +45,18 @@ async function loadProductosForCaja() {
 async function loadPromociones() {
   try {
     const res = await fetch('/api/promociones/activas');
-    if (!res.ok) return;
+    if (!res.ok) {
+      promocionesCache = [];
+      return;
+    }
     const data = await res.json();
     promocionesCache = data.promociones || [];
+    // Después de cargar promociones, actualizar vista si hay carrito
+    renderCart();
   } catch (e) {
     console.error('Error cargando promociones:', e);
-    showNotification('No se pudieron cargar las promociones. Intenta recargar.', 'error');
+    showNotification('No se pudieron cargar las promociones.', 'error');
+    promocionesCache = [];
   }
 }
 
@@ -87,7 +95,7 @@ function calcularTotalesForm() {
   // tasa en el front se obtiene al pedir /api/tasa-bcv si se quiere convertir, omitimos aquí
 }
 
-function onAgregarAlCarrito() {
+async function onAgregarAlCarrito() {
   const id_producto = document.getElementById('ventaProducto').value;
   const id_talla = document.getElementById('ventaTalla').value || null;
   const cantidad = parseInt(document.getElementById('ventaCantidad').value || 0);
@@ -95,12 +103,22 @@ function onAgregarAlCarrito() {
   if (!id_producto || !cantidad || cantidad <= 0) { alert('Selecciona producto y cantidad válida'); return; }
   const prod = productosCache.find(p => String(p.id_producto) === String(id_producto));
   cajaCart.push({ id_producto: Number(id_producto), id_talla: id_talla ? Number(id_talla) : null, cantidad, precio_unitario, nombre: prod ? (prod.nombre || prod.marca) : 'Producto', no_aplicar_promocion: false, force_promotion_id: null });
+  // Asegurar que promociones estén cargadas antes de renderizar
+  if (!promocionesCache || promocionesCache.length === 0) {
+    await loadPromociones().catch(()=>{});
+  }
   renderCart();
 }
 
 function aplicarMejorPromocion(item) {
   // Lógica simplificada que emula al servidor: evalúa promocionesCache y devuelve {promo, descuento_total, detalle}
-  const pAplicables = promocionesCache.filter(p => p.activa && new Date(p.fecha_inicio) <= new Date() && new Date(p.fecha_fin) >= new Date());
+  // promocionesCache ya debería contener solo promociones activas (endpoint /api/promociones/activas)
+  const now = new Date();
+  const pAplicables = promocionesCache.filter(p => {
+    try {
+      return (!p.fecha_inicio || new Date(p.fecha_inicio) <= now) && (!p.fecha_fin || new Date(p.fecha_fin) >= now);
+    } catch (e) { return true; }
+  });
   const prodInfo = productosCache.find(p => p.id_producto === item.id_producto) || {};
   let mejor = { descuento: 0, promo: null, detalle: null };
   const subtotal = item.precio_unitario * item.cantidad;
@@ -175,11 +193,13 @@ function renderCart() {
     total += lineaTotal; totalDescuentos += descuento;
     // Controles: checkbox para aplicar/ignorar promo y select para forzar promoción
     const promoOptions = promocionesCache.filter(p => {
-      if (!p.activa) return false;
-      const now = new Date();
-      if (new Date(p.fecha_inicio) > now || new Date(p.fecha_fin) < now) return false;
-      if (p.id_producto && Number(p.id_producto) !== Number(it.id_producto)) return false;
-      return true;
+      try {
+        const now = new Date();
+        if (p.id_producto && Number(p.id_producto) !== Number(it.id_producto)) return false;
+        if (p.fecha_inicio && new Date(p.fecha_inicio) > now) return false;
+        if (p.fecha_fin && new Date(p.fecha_fin) < now) return false;
+        return true;
+      } catch (e) { return false; }
     });
     const promoSelectHtml = promoOptions.length > 0 ? `
       <select onchange="window._caja.setForcedPromo(${idx}, this.value)">
